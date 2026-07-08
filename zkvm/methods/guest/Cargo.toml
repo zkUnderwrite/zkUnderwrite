@@ -1,0 +1,21 @@
+[package]
+name = "zku-guest"
+version = "0.1.0"
+edition = "2021"
+
+# Detach the guest from the host workspace (built for the zkVM target).
+[workspace]
+
+[[bin]]
+name = "zku-guest"
+path = "src/main.rs"
+
+[dependencies]
+risc0-zkvm = { version = "3.0", default-features = false, features = ["std"] }
+ed25519-dalek = { version = "2", default-features = false }
+sha2 = "0.10"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+opt-level = 3

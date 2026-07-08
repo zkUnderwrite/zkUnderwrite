@@ -1,0 +1,25 @@
+# RISC Zero Stellar Deployment Configuration
+# Managed by scripts/manage.sh — auto-updated after deploy/management operations
+
+
+[chains.stellar-testnet]
+name = "Stellar Testnet"
+admin = "GA5TVGKVXW4CVFLPQXKKKGPH63VT6FKB4LKMTPRIBLPCMYMOO2GYQIZX"
+router = "CB2K2RS7CAY6AUZWWX5VI6SS5ZVSC5XYAN5ZCNG2FAZMAOHCSOYZ3S3T"
+timelock-controller = "CBKU7MT3MFYSVFVPPMTW3G364BIT7LJFTQHKFKI6EZV7A2YGJFRBLY3L"
+timelock-delay = 0
+
+[[chains.stellar-testnet.verifiers]]
+name = "groth16-verifier"
+version = "3.0.0"
+selector = "73c457ba"
+verifier = "CCGTCTDQI7YU2YBWXZPERJZCLFZ5ZSVW6JVEYEGWC4XKQRZNYDZPTIEV"
+estop = "CCAG5V7HGSPLV47C4NA5D57TCXAB6S43JOALXEZ7DQBR72QBLAQVLBPE"
+unroutable = true
+
+[chains.stellar-mainnet]
+name = "Stellar Mainnet"
+admin = ""
+router = ""
+timelock-controller = ""
+timelock-delay = 604800

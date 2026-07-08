@@ -1,0 +1,11 @@
+[package]
+name = "host"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+methods = { path = "../methods" }
+risc0-zkvm = { version = "3.0" }
+risc0-ethereum-contracts = "3.0"
+sha2 = "0.10"
+hex = "0.4"

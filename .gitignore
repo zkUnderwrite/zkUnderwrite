@@ -1,0 +1,24 @@
+# Rust / build artifacts
+target/
+**/target/
+Cargo.lock
+
+# RISC Zero / proving outputs
+proof.txt
+zkvm/statement.json
+zkvm/signature.bin
+zkvm/issuer_pubkey.bin
+
+# Secrets — the demo issuer's private signing key must never be committed
+issuer_signing.bin
+work/issuer_signing.bin
+work/
+
+# Local deployment scratch (addresses are documented in DEPLOYMENTS.md)
+.usdc_issuer
+.usdc_sac
+.zku_contract
+
+# OS / editor
+.DS_Store
+*.swp

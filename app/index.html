@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>zkUnderwrite — prove your income, not your statements</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+<style>
+  :root{
+    --ink:#11131A; --ink-2:#1A1E2B; --paper:#ECEAE1; --paper-line:#D8D4C8;
+    --redact:#0B0B0F; --verify:#3DD8B0; --verify-dim:#1f6b58;
+    --muted:#8A93A6; --muted-2:#5b6273; --hot:#E8654F;
+    --line:#272c3a;
+    --disp:"Space Grotesk",sans-serif; --body:"Inter",sans-serif; --mono:"IBM Plex Mono",monospace;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{margin:0;background:var(--ink);color:#E7EAF0;font-family:var(--body);-webkit-font-smoothing:antialiased;line-height:1.5}
+  a{color:inherit}
+  .wrap{max-width:1140px;margin:0 auto;padding:0 24px}
+  .mono{font-family:var(--mono)}
+
+  /* top bar */
+  header.bar{position:sticky;top:0;z-index:20;background:rgba(17,19,26,.82);backdrop-filter:blur(10px);border-bottom:1px solid var(--line)}
+  .bar .wrap{display:flex;align-items:center;justify-content:space-between;height:62px}
+  .brand{font-family:var(--disp);font-weight:700;letter-spacing:-.02em;font-size:19px}
+  .brand b{color:var(--verify)}
+  .net{font-family:var(--mono);font-size:12px;color:var(--muted);border:1px solid var(--line);border-radius:999px;padding:5px 11px}
+  .net .dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--verify);margin-right:7px;vertical-align:middle;box-shadow:0 0 0 3px rgba(61,216,176,.15)}
+
+  /* hero */
+  .hero{padding:74px 0 40px}
+  .eyebrow{font-family:var(--mono);font-size:12.5px;letter-spacing:.16em;text-transform:uppercase;color:var(--verify);margin-bottom:22px}
+  h1{font-family:var(--disp);font-weight:700;letter-spacing:-.035em;font-size:clamp(38px,6vw,68px);line-height:1.02;margin:0 0 20px}
+  h1 .strike{position:relative;white-space:nowrap}
+  h1 .strike::after{content:"";position:absolute;left:-2px;right:-2px;top:54%;height:.13em;background:var(--hot);transform:rotate(-1.5deg)}
+  .lede{font-size:19px;color:#B9C0CE;max-width:620px;margin:0 0 30px}
+  .lede b{color:#E7EAF0;font-weight:600}
+
+  /* split: private vs public */
+  .split{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin:18px 0 8px}
+  @media(max-width:820px){.split{grid-template-columns:1fr}}
+  .panel{border-radius:16px;overflow:hidden;border:1px solid var(--line)}
+  .panel .cap{display:flex;align-items:center;gap:9px;font-family:var(--mono);font-size:11.5px;letter-spacing:.12em;text-transform:uppercase;padding:13px 18px;border-bottom:1px solid}
+  .lock{width:13px;height:13px;flex:none}
+
+  /* private document */
+  .doc{background:var(--paper);color:#23262e}
+  .doc .cap{color:#6b6256;border-color:var(--paper-line)}
+  .doc .body{padding:20px 18px 22px;font-family:var(--mono);font-size:13px}
+  .doc .row{display:flex;justify-content:space-between;align-items:center;padding:9px 0;border-bottom:1px dashed var(--paper-line)}
+  .doc .row:last-child{border-bottom:0}
+  .doc .k{color:#7a7264}
+  .bar-redact{display:inline-block;height:16px;border-radius:3px;background:var(--redact);position:relative;overflow:hidden}
+  .bar-redact::after{content:"";position:absolute;inset:0;background:linear-gradient(90deg,transparent,rgba(255,255,255,.07),transparent);transform:translateX(-100%);animation:sheen 3.4s infinite}
+  @keyframes sheen{0%{transform:translateX(-100%)}55%,100%{transform:translateX(220%)}}
+  .doc .foot{margin-top:14px;font-size:11px;color:#8a8275;display:flex;align-items:center;gap:7px}
+
+  /* public chain */
+  .chain{background:linear-gradient(180deg,#161a26,#12151f)}
+  .chain .cap{color:var(--muted);border-color:var(--line)}
+  .chain .body{padding:18px}
+  .field{font-family:var(--mono);font-size:12.5px;padding:11px 13px;border:1px solid var(--line);border-radius:10px;margin-bottom:9px;background:#0e111a;display:flex;justify-content:space-between;gap:12px;align-items:center}
+  .field .lab{color:var(--muted)}
+  .field .val{color:#D7DCE8;text-align:right;word-break:break-all}
+  .verified{display:flex;align-items:center;gap:10px;margin-top:14px;padding:13px 14px;border-radius:10px;background:rgba(61,216,176,.08);border:1px solid var(--verify-dim)}
+  .verified .ck{width:22px;height:22px;flex:none}
+  .verified .t{font-size:13.5px}
+  .verified .t b{color:var(--verify);font-family:var(--disp);font-weight:600}
+
+  /* live console */
+  .live{margin:64px 0 30px;border:1px solid var(--line);border-radius:18px;background:linear-gradient(180deg,#14172040,#0e111a);overflow:hidden}
+  .live-head{padding:22px 24px;border-bottom:1px solid var(--line);display:flex;flex-wrap:wrap;gap:6px 18px;align-items:baseline;justify-content:space-between}
+  .live-head h2{font-family:var(--disp);font-weight:600;letter-spacing:-.02em;font-size:21px;margin:0}
+  .live-head p{margin:0;color:var(--muted);font-size:13.5px}
+  .live-grid{display:grid;grid-template-columns:1.15fr 1fr;gap:0}
+  @media(max-width:820px){.live-grid{grid-template-columns:1fr}}
+  .live-col{padding:24px}
+  .live-col+.live-col{border-left:1px solid var(--line)}
+  @media(max-width:820px){.live-col+.live-col{border-left:0;border-top:1px solid var(--line)}}
+  label.fl{display:block;font-family:var(--mono);font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--muted);margin-bottom:9px}
+  .inrow{display:flex;gap:9px}
+  input[type=text]{flex:1;min-width:0;background:#0c0f17;border:1px solid var(--line);color:#E7EAF0;font-family:var(--mono);font-size:13px;border-radius:10px;padding:12px 13px}
+  input[type=text]:focus{outline:none;border-color:var(--verify-dim);box-shadow:0 0 0 3px rgba(61,216,176,.12)}
+  button.go{background:var(--verify);color:#06281f;border:0;font-family:var(--disp);font-weight:600;font-size:14px;padding:0 18px;border-radius:10px;cursor:pointer;white-space:nowrap}
+  button.go:hover{filter:brightness(1.06)}
+  button.go:disabled{opacity:.5;cursor:default}
+  .hint{margin-top:9px;font-size:12px;color:var(--muted-2)}
+  .hint a{color:var(--muted);text-decoration:underline}
+  .stat{margin-top:6px}
+  .stat .big{font-family:var(--disp);font-weight:700;letter-spacing:-.03em;font-size:42px;line-height:1}
+  .stat .big.on{color:var(--verify)}
+  .stat .sub{color:var(--muted);font-size:13px;margin-top:7px}
+  .treasury{display:flex;align-items:baseline;justify-content:space-between;padding:14px 0;border-bottom:1px solid var(--line)}
+  .treasury:last-child{border-bottom:0}
+  .treasury .l{color:var(--muted);font-size:13px}
+  .treasury .v{font-family:var(--mono);font-size:15px}
+
+  /* flow */
+  .flow{margin:64px 0}
+  .flow h2{font-family:var(--disp);font-weight:600;letter-spacing:-.02em;font-size:24px;margin:0 0 6px}
+  .flow .sub{color:var(--muted);margin:0 0 26px;font-size:14.5px}
+  .steps{display:grid;grid-template-columns:repeat(4,1fr);gap:14px}
+  @media(max-width:820px){.steps{grid-template-columns:1fr 1fr}}
+  @media(max-width:520px){.steps{grid-template-columns:1fr}}
+  .step{border:1px solid var(--line);border-radius:14px;padding:18px;background:#0e111a;position:relative}
+  .step .n{font-family:var(--mono);font-size:12px;color:var(--verify);margin-bottom:12px}
+  .step h3{font-family:var(--disp);font-weight:600;font-size:16px;margin:0 0 7px;letter-spacing:-.01em}
+  .step p{margin:0;font-size:13px;color:#A6AEBF}
+  .step .where{margin-top:11px;font-family:var(--mono);font-size:10.5px;letter-spacing:.1em;text-transform:uppercase}
+  .where.priv{color:#caa86a}.where.pub{color:var(--verify)}
+
+  /* deployed */
+  .deployed{margin:54px 0 80px}
+  .deployed h2{font-family:var(--disp);font-weight:600;font-size:18px;margin:0 0 16px;letter-spacing:-.01em}
+  .addrs{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+  @media(max-width:680px){.addrs{grid-template-columns:1fr}}
+  .addr{display:flex;justify-content:space-between;gap:12px;align-items:center;border:1px solid var(--line);border-radius:10px;padding:12px 14px;background:#0e111a}
+  .addr .l{font-size:13px;color:var(--muted)}
+  .addr a{font-family:var(--mono);font-size:12px;color:var(--verify);text-decoration:none;word-break:break-all;text-align:right}
+  footer{border-top:1px solid var(--line);padding:26px 0;color:var(--muted-2);font-size:12.5px}
+  footer b{color:var(--muted)}
+
+  @media (prefers-reduced-motion: reduce){*{animation:none!important;transition:none!important}}
+</style>
+</head>
+<body>
+<header class="bar"><div class="wrap">
+  <div class="brand">zk<b>Underwrite</b></div>
+  <div class="net"><span class="dot"></span>Stellar Testnet · live</div>
+</div></header>
+
+<main class="wrap">
+  <section class="hero">
+    <div class="eyebrow">Private proof-of-income → on-chain credit</div>
+    <h1>Prove your income.<br/>Not your <span class="strike">bank statements</span>.</h1>
+    <p class="lede">zkUnderwrite turns a bank- or payroll-signed income statement into a zero-knowledge proof. A Stellar contract checks the proof and unlocks a USDC credit line — <b>without the chain ever seeing your transactions or your identity.</b></p>
+
+    <div class="split">
+      <!-- PRIVATE -->
+      <div class="panel doc">
+        <div class="cap"><svg class="lock" viewBox="0 0 24 24" fill="none" stroke="#6b6256" stroke-width="2"><rect x="4" y="11" width="16" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg>Stays on your device</div>
+        <div class="body">
+          <div class="row"><span class="k">account holder</span><span class="bar-redact" style="width:142px"></span></div>
+          <div class="row"><span class="k">monthly net — apr</span><span class="bar-redact" style="width:78px"></span></div>
+          <div class="row"><span class="k">monthly net — may</span><span class="bar-redact" style="width:92px"></span></div>
+          <div class="row"><span class="k">monthly net — jun</span><span class="bar-redact" style="width:70px"></span></div>
+          <div class="row"><span class="k">issuer signature</span><span class="bar-redact" style="width:120px"></span></div>
+          <div class="foot"><svg class="lock" viewBox="0 0 24 24" fill="none" stroke="#8a8275" stroke-width="2"><rect x="4" y="11" width="16" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg>Proven inside a RISC Zero zkVM — never transmitted.</div>
+        </div>
+      </div>
+      <!-- PUBLIC -->
+      <div class="panel chain">
+        <div class="cap">What the chain sees</div>
+        <div class="body">
+          <div class="field"><span class="lab">issuer</span><span class="val">trusted ✓ (registered key)</span></div>
+          <div class="field"><span class="lab">threshold</span><span class="val">≥ 3,000 / mo</span></div>
+          <div class="field"><span class="lab">income meets it</span><span class="val" style="color:var(--verify)">true</span></div>
+          <div class="field"><span class="lab">nullifier</span><span class="val">cfbcb11a…086559</span></div>
+          <div class="field"><span class="lab">proof</span><span class="val">Groth16 / BN254</span></div>
+          <div class="verified">
+            <svg class="ck" viewBox="0 0 24 24" fill="none" stroke="var(--verify)" stroke-width="2.4"><circle cx="12" cy="12" r="9.5"/><path d="M8 12.4l2.6 2.6L16 9.6"/></svg>
+            <div class="t">Verified on-chain. <b>Credit line unlocked.</b></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- LIVE -->
+  <section class="live" id="live">
+    <div class="live-head">
+      <div><h2>Live on testnet</h2><p>Read the deployed contract directly. Every value below is on-chain.</p></div>
+    </div>
+    <div class="live-grid">
+      <div class="live-col">
+        <label class="fl">Check a borrower's credit line</label>
+        <div class="inrow">
+          <input type="text" id="addr" placeholder="G… Stellar address" spellcheck="false" />
+          <button class="go" id="check">Check</button>
+        </div>
+        <div class="hint" id="hint">Tip: paste any G-address. Borrowers who submitted a valid proof show an unlocked line.</div>
+        <div class="stat">
+          <div class="big" id="cl">—</div>
+          <div class="sub" id="clsub">awaiting lookup</div>
+        </div>
+      </div>
+      <div class="live-col">
+        <label class="fl">Lender pool</label>
+        <div class="treasury"><span class="l">USDC treasury (disbursable)</span><span class="v" id="treasury">…</span></div>
+        <div class="treasury"><span class="l">Credit line per approval</span><span class="v">500.00 USDC</span></div>
+        <div class="treasury"><span class="l">Required income</span><span class="v">≥ 3,000 / mo</span></div>
+        <div class="treasury"><span class="l">Verifier</span><span class="v">RISC Zero · Groth16</span></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- FLOW -->
+  <section class="flow">
+    <h2>How a private loan happens</h2>
+    <p class="sub">Four steps. The income data never leaves the first one.</p>
+    <div class="steps">
+      <div class="step"><div class="n">step 1</div><h3>Issuer signs</h3><p>A bank or payroll provider signs your income statement with its key.</p><div class="where priv">private · your device</div></div>
+      <div class="step"><div class="n">step 2</div><h3>You prove</h3><p>A RISC Zero zkVM verifies the signature and checks income ≥ threshold — producing a proof, not a disclosure.</p><div class="where priv">private · your device</div></div>
+      <div class="step"><div class="n">step 3</div><h3>Contract verifies</h3><p>The Soroban contract checks the Groth16 proof against the exact program it expects.</p><div class="where pub">public · Stellar</div></div>
+      <div class="step"><div class="n">step 4</div><h3>Credit unlocks</h3><p>A USDC credit line is disbursed from the lender pool. Nullifier blocks reuse.</p><div class="where pub">public · Stellar</div></div>
+    </div>
+  </section>
+
+  <!-- DEPLOYED -->
+  <section class="deployed">
+    <h2>Deployed contracts</h2>
+    <div class="addrs" id="addrs"></div>
+  </section>
+</main>
+
+<footer><div class="wrap">
+  <b>zkUnderwrite</b> — Stellar Hacks: Real-World ZK. ZK is load-bearing: a Groth16 proof, verified in a Soroban contract, is the only thing that unlocks credit. Research prototype on testnet — not audited, no real funds.
+</div></footer>
+
+<script type="module">
+import * as Sdk from 'https://esm.sh/@stellar/stellar-sdk@13.1.0';
+const { rpc, Contract, Address, scValToNative, TransactionBuilder, Networks, BASE_FEE, Account } = Sdk;
+
+const CFG = {
+  rpc: 'https://soroban-testnet.stellar.org',
+  zku:  'CCLXJCWPJ6FDTDITRAHCPHCD55LYXUCEYYLER5UKKCIS5UUEPP2DACBB',
+  usdc: 'CDDHQYZQBR3347KAMZFB52ISBSNNDXJMSMPVBYQ2FTHH7KBIIMZZYTO6',
+  router:'CB2K2RS7CAY6AUZWWX5VI6SS5ZVSC5XYAN5ZCNG2FAZMAOHCSOYZ3S3T',
+  verifier:'CCGTCTDQI7YU2YBWXZPERJZCLFZ5ZSVW6JVEYEGWC4XKQRZNYDZPTIEV',
+  demo: 'GA5TVGKVXW4CVFLPQXKKKGPH63VT6FKB4LKMTPRIBLPCMYMOO2GYQIZX',
+};
+const EXP = (id)=>`https://stellar.expert/explorer/testnet/contract/${id}`;
+const server = new rpc.Server(CFG.rpc);
+const fmt = (i128)=> (Number(i128)/1e7).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
+
+async function simRead(contractId, method, args){
+  const c = new Contract(contractId);
+  const src = new Account(CFG.demo, '0');
+  const tx = new TransactionBuilder(src,{fee:BASE_FEE,networkPassphrase:Networks.TESTNET})
+    .addOperation(c.call(method, ...args)).setTimeout(30).build();
+  const sim = await server.simulateTransaction(tx);
+  if (rpc.Api.isSimulationError(sim)) throw new Error(sim.error);
+  return scValToNative(sim.result.retval);
+}
+
+// deployed addresses panel
+const addrs = [
+  ['zkUnderwrite contract', CFG.zku],
+  ['USDC (testnet SAC)', CFG.usdc],
+  ['RISC Zero router', CFG.router],
+  ['Groth16 verifier', CFG.verifier],
+];
+document.getElementById('addrs').innerHTML = addrs.map(([l,id])=>
+  `<div class="addr"><span class="l">${l}</span><a href="${EXP(id)}" target="_blank" rel="noopener">${id.slice(0,8)}…${id.slice(-6)}</a></div>`).join('');
+
+// treasury balance
+(async()=>{
+  try{ const bal = await simRead(CFG.usdc,'balance',[new Address(CFG.zku).toScVal()]);
+       document.getElementById('treasury').textContent = fmt(bal)+' USDC';
+  }catch(e){ document.getElementById('treasury').textContent='unavailable'; }
+})();
+
+// credit line lookup
+const $=(id)=>document.getElementById(id);
+async function check(){
+  const a = $('addr').value.trim();
+  const big=$('cl'), sub=$('clsub');
+  if(!/^G[A-Z0-9]{55}$/.test(a)){ sub.textContent='enter a valid G-address'; big.textContent='—'; big.classList.remove('on'); return; }
+  $('check').disabled=true; sub.textContent='reading contract…';
+  try{
+    const cl = await simRead(CFG.zku,'credit_line',[new Address(a).toScVal()]);
+    const v = Number(cl)/1e7;
+    big.textContent = (v>0?'$':'') + (v>0? fmt(cl): '$0.00');
+    big.classList.toggle('on', v>0);
+    sub.innerHTML = v>0
+      ? `unlocked credit line · <a href="${EXP(CFG.zku)}" target="_blank" rel="noopener" style="color:var(--muted)">view contract ↗</a>`
+      : 'no credit line yet — this address hasn’t submitted a valid proof';
+  }catch(e){ sub.textContent='read failed: '+(e.message||e); }
+  $('check').disabled=false;
+}
+$('check').addEventListener('click',check);
+$('addr').addEventListener('keydown',e=>{if(e.key==='Enter')check();});
+$('addr').value = CFG.demo;
+</script>
+</body>
+</html>

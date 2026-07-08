@@ -1,0 +1,39 @@
+# RISC Zero build/prove environment for zkUnderwrite.
+# Runs linux/amd64 natively on Intel macOS (no QEMU emulation) — full speed.
+# rzup does NOT support darwin/x86_64, so all guest-build + proving happens here.
+#
+# Two stages so a flaky-connection failure on the large risc0-groth16 artifact
+# does NOT discard the (already-downloaded) toolchain:
+#   --target base : cargo-risczero + r0vm + rust  (enough to build the guest,
+#                   get the image id, run execution; deploy the app contract)
+#   --target full : adds risc0-groth16 (STARK->SNARK prover) with auto-retry,
+#                   required only for the final Groth16 receipt.
+#
+# Pinned to RISC Zero 3.0.5: the deployed Groth16 verifier embeds the 3.0 circuit
+# control root (contracts/groth16-verifier/parameters.json version 3.0.0); 3.0.x
+# patches share that control root, and the verifier uses risc0-zkvm = ^3.0.
+
+FROM --platform=linux/amd64 rust:1.94-bookworm AS base
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        curl ca-certificates xz-utils build-essential pkg-config libssl-dev git \
+        docker.io \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV PATH="/root/.risc0/bin:${PATH}"
+RUN curl -L https://risczero.com/install | bash \
+    && rzup install cargo-risczero 3.0.5 \
+    && rzup install r0vm 3.0.5 \
+    && rzup install rust
+
+WORKDIR /work
+CMD ["bash"]
+
+# --- full stage: add the Groth16 prover with retries (flaky-link resilient) ---
+FROM base AS full
+RUN set -e; \
+    for i in $(seq 1 40); do \
+        echo "risc0-groth16 install attempt $i"; \
+        rzup install risc0-groth16 && break || { echo "attempt $i failed; retrying"; sleep 15; }; \
+    done; \
+    rzup show | grep -i groth16 || (echo "risc0-groth16 NOT installed" && exit 1)

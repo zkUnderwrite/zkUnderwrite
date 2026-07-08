@@ -1,0 +1,28 @@
+[package]
+name = "zkunderwrite"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+publish = false
+
+[lib]
+crate-type = ["lib", "cdylib"]
+doctest = false
+
+[dependencies]
+soroban-sdk = "25.1.0"
+# RISC Zero verifier router client (forked Nethermind verifier, vendored locally)
+risc0-interface = { path = "../../reference-verifier/contracts/interface" }
+
+[dev-dependencies]
+soroban-sdk = { version = "25.1.0", features = ["testutils"] }
+
+[profile.release]
+opt-level = "z"
+overflow-checks = true
+debug = 0
+strip = "symbols"
+debug-assertions = false
+panic = "abort"
+codegen-units = 1
+lto = true
