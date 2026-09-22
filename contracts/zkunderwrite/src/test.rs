@@ -2,7 +2,7 @@
 use super::*;
 use soroban_sdk::{
     contract, contractimpl,
-    testutils::Address as _,
+    testutils::{storage::Instance as _, storage::Persistent as _, Address as _, Ledger as _},
     token, Address, Bytes, BytesN, Env,
 };
 
@@ -196,4 +196,82 @@ fn journal_readers_roundtrip() {
         read_bytes32(&env, &journal, OFF_NULLIFIER),
         BytesN::from_array(&env, &[0x22u8; 32])
     );
+}
+
+#[test]
+fn instance_ttl_is_extended_on_entry_points() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let id = env.register(ZkUnderwrite, ());
+    let client = ZkUnderwriteClient::new(&env, &id);
+    let (admin, router, usdc, image_id) = setup(&env);
+
+    client.init(&admin, &router, &image_id, &usdc, &3000u64, &500_0000000i128);
+    env.as_contract(&id, || {
+        assert_eq!(env.storage().instance().get_ttl(), INSTANCE_TTL_EXTEND_TO);
+    });
+
+    // Advance close to (but before) the renewal threshold and hit another
+    // instance-reading entry point: the TTL must be bumped back out.
+    env.ledger()
+        .set_sequence_number(INSTANCE_TTL_EXTEND_TO - INSTANCE_TTL_THRESHOLD + 1);
+    let issuer_hash = BytesN::from_array(&env, &[9u8; 32]);
+    client.register_issuer(&issuer_hash);
+    env.as_contract(&id, || {
+        assert_eq!(env.storage().instance().get_ttl(), INSTANCE_TTL_EXTEND_TO);
+    });
+}
+
+#[test]
+fn persistent_entries_survive_near_expiry_and_nullifier_still_blocks_replay() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let token_admin = Address::generate(&env);
+    let usdc = env.register_stellar_asset_contract_v2(token_admin.clone());
+    let usdc_id = usdc.address();
+    let usdc_admin = token::StellarAssetClient::new(&env, &usdc_id);
+
+    let router = env.register(StubRouter, ());
+    let id = env.register(ZkUnderwrite, ());
+    let client = ZkUnderwriteClient::new(&env, &id);
+    let admin = Address::generate(&env);
+    let image_id = BytesN::from_array(&env, &[7u8; 32]);
+    let credit = 500_0000000i128;
+    client.init(&admin, &router, &image_id, &usdc_id, &3000u64, &credit);
+
+    let issuer_hash = [0x11u8; 32];
+    let issuer_key = DataKey::Issuer(BytesN::from_array(&env, &issuer_hash));
+    client.register_issuer(&BytesN::from_array(&env, &issuer_hash));
+    usdc_admin.mint(&id, &1_000_0000000i128);
+
+    let borrower = Address::generate(&env);
+    let nullifier = [0x22u8; 32];
+    let j = journal(&env, issuer_hash, 3000, 1, nullifier, 202506);
+    let seal = Bytes::from_array(&env, &[0u8; 4]);
+
+    client.request_credit(&borrower, &seal, &j);
+    let null_key = DataKey::Nullifier(BytesN::from_array(&env, &nullifier));
+    env.as_contract(&id, || {
+        assert_eq!(
+            env.storage().persistent().get_ttl(&issuer_key),
+            PERSISTENT_TTL_EXTEND_TO
+        );
+        assert_eq!(
+            env.storage().persistent().get_ttl(&null_key),
+            PERSISTENT_TTL_EXTEND_TO
+        );
+    });
+
+    // Advance the ledger to just short of when these entries would have
+    // expired without the TTL extension above; they must still be alive.
+    env.ledger().set_sequence_number(PERSISTENT_TTL_EXTEND_TO - 1);
+    env.as_contract(&id, || {
+        assert!(env.storage().persistent().has(&issuer_key));
+        assert!(env.storage().persistent().has(&null_key));
+    });
+
+    // The nullifier must still correctly block a replay after the advance.
+    let replay = client.try_request_credit(&borrower, &seal, &j);
+    assert!(replay.is_err());
 }

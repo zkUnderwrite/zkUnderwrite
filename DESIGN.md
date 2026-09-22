@@ -96,6 +96,19 @@ Functions:
      real testnet USDC from the contract treasury to `borrower` (TokenClient).
   9. Emit `CreditGranted(borrower, credit_amount, period)`.
 
+### Storage TTLs
+
+Soroban archives instance and persistent entries once their TTL lapses, so
+every entry point that reads or writes instance config (`init`,
+`register_issuer`, `request_credit`) extends the instance TTL, and every
+read/write of an `issuers` or `nullifiers` entry extends that entry's
+persistent TTL. Thresholds and extension amounts are named constants in
+`lib.rs` (`INSTANCE_TTL_THRESHOLD`/`INSTANCE_TTL_EXTEND_TO`,
+`PERSISTENT_TTL_THRESHOLD`/`PERSISTENT_TTL_EXTEND_TO`): instance storage is
+renewed to 30 days once it has 7 days left, and issuer/nullifier entries are
+renewed to 365 days once they have 30 days left — long enough that neither a
+registered issuer nor a spent nullifier can expire between calls.
+
 ## Components & layout
 
 ```
