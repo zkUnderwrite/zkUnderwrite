@@ -1,9 +1,10 @@
 #![cfg(test)]
 use super::*;
+use risc0_interface::VerifierError;
 use soroban_sdk::{
     contract, contractimpl,
-    testutils::Address as _,
-    token, Address, Bytes, BytesN, Env,
+    testutils::{Address as _, Events as _},
+    token, vec, Address, Bytes, BytesN, Env, IntoVal, Val,
 };
 
 /// Stub verifier-router that always accepts — stands in for the deployed RISC
@@ -17,6 +18,25 @@ pub struct StubRouter;
 #[contractimpl]
 impl StubRouter {
     pub fn verify(_env: Env, _seal: Bytes, _image_id: BytesN<32>, _journal: BytesN<32>) {}
+}
+
+/// Stub verifier-router that always rejects — stands in for a real router
+/// refusing a proof (e.g. wrong image id or an invalid seal), so we can
+/// confirm `request_credit` propagates that rejection as an error instead of
+/// silently treating a failed verification as success.
+#[contract]
+pub struct RejectingRouter;
+
+#[contractimpl]
+impl RejectingRouter {
+    pub fn verify(
+        _env: Env,
+        _seal: Bytes,
+        _image_id: BytesN<32>,
+        _journal: BytesN<32>,
+    ) -> Result<(), VerifierError> {
+        Err(VerifierError::InvalidProof)
+    }
 }
 
 /// Build an 81-byte journal in the contract's expected layout.
@@ -68,6 +88,74 @@ fn double_init_panics() {
     let (admin, router, usdc, image_id) = setup(&env);
     client.init(&admin, &router, &image_id, &usdc, &3000u64, &500_0000000i128);
     client.init(&admin, &router, &image_id, &usdc, &3000u64, &500_0000000i128);
+}
+
+#[test]
+fn init_rejects_zero_credit_amount() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let id = env.register(ZkUnderwrite, ());
+    let client = ZkUnderwriteClient::new(&env, &id);
+    let (admin, router, usdc, image_id) = setup(&env);
+
+    let result = client.try_init(&admin, &router, &image_id, &usdc, &3000u64, &0i128);
+    assert!(result.is_err());
+}
+
+#[test]
+fn init_rejects_zero_threshold() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let id = env.register(ZkUnderwrite, ());
+    let client = ZkUnderwriteClient::new(&env, &id);
+    let (admin, router, usdc, image_id) = setup(&env);
+
+    let result = client.try_init(&admin, &router, &image_id, &usdc, &0u64, &500_0000000i128);
+    assert!(result.is_err());
+}
+
+#[test]
+fn init_rejects_all_zero_image_id() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let id = env.register(ZkUnderwrite, ());
+    let client = ZkUnderwriteClient::new(&env, &id);
+    let (admin, router, usdc, _image_id) = setup(&env);
+    let zero_image_id = BytesN::from_array(&env, &[0u8; 32]);
+
+    let result = client.try_init(&admin, &router, &zero_image_id, &usdc, &3000u64, &500_0000000i128);
+    assert!(result.is_err());
+}
+
+#[test]
+fn request_credit_rejects_bad_journal_length() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let token_admin = Address::generate(&env);
+    let usdc = env.register_stellar_asset_contract_v2(token_admin.clone());
+    let usdc_id = usdc.address();
+    let router = env.register(StubRouter, ());
+    let id = env.register(ZkUnderwrite, ());
+    let client = ZkUnderwriteClient::new(&env, &id);
+    let (admin, _r, _u, image_id) = setup(&env);
+    client.init(&admin, &router, &image_id, &usdc_id, &3000u64, &500_0000000i128);
+
+    let borrower = Address::generate(&env);
+    let seal = Bytes::from_array(&env, &[0u8; 4]);
+    let short_journal = Bytes::from_array(&env, &[0u8; 40]); // not 81 bytes
+
+    let result = client.try_request_credit(&borrower, &seal, &short_journal);
+    assert!(result.is_err());
+}
+
+#[test]
+#[should_panic]
+fn read_helpers_reject_out_of_range_offsets() {
+    let env = Env::default();
+    // Too short for a 32-byte read at offset 0 -> the read helper must error
+    // instead of letting `journal.get(..).unwrap()` panic uncontrolled.
+    let short = Bytes::from_array(&env, &[0u8; 10]);
+    let _ = read_bytes32(&env, &short, OFF_ISSUER_HASH);
 }
 
 #[test]
@@ -169,6 +257,218 @@ fn request_credit_rejects_unregistered_issuer_and_below_threshold() {
 }
 
 #[test]
+fn request_credit_rejects_meets_zero_with_exact_error() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let token_admin = Address::generate(&env);
+    let usdc = env.register_stellar_asset_contract_v2(token_admin);
+    let usdc_id = usdc.address();
+    let router = env.register(StubRouter, ());
+    let id = env.register(ZkUnderwrite, ());
+    let client = ZkUnderwriteClient::new(&env, &id);
+    let admin = Address::generate(&env);
+    let image_id = BytesN::from_array(&env, &[7u8; 32]);
+    client.init(&admin, &router, &image_id, &usdc_id, &3000u64, &500_0000000i128);
+    token::StellarAssetClient::new(&env, &usdc_id).mint(&id, &1_000_0000000i128);
+
+    let issuer_hash = [0x11u8; 32];
+    client.register_issuer(&BytesN::from_array(&env, &issuer_hash));
+
+    let borrower = Address::generate(&env);
+    let seal = Bytes::from_array(&env, &[0u8; 4]);
+    // Threshold is met, but the guest reported `meets == 0`.
+    let j = journal(&env, issuer_hash, 3000, 0, [0x22u8; 32], 202506);
+
+    let Err(Ok(err)) = client.try_request_credit(&borrower, &seal, &j) else {
+        panic!("expected IncomeBelowThreshold");
+    };
+    assert_eq!(err, Error::IncomeBelowThreshold);
+    assert_eq!(client.credit_line(&borrower), 0);
+}
+
+#[test]
+fn request_credit_rejects_bad_journal_length_with_exact_error() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let token_admin = Address::generate(&env);
+    let usdc = env.register_stellar_asset_contract_v2(token_admin);
+    let usdc_id = usdc.address();
+    let router = env.register(StubRouter, ());
+    let id = env.register(ZkUnderwrite, ());
+    let client = ZkUnderwriteClient::new(&env, &id);
+    let (admin, _r, _u, image_id) = setup(&env);
+    client.init(&admin, &router, &image_id, &usdc_id, &3000u64, &500_0000000i128);
+
+    let borrower = Address::generate(&env);
+    let seal = Bytes::from_array(&env, &[0u8; 4]);
+    let short_journal = Bytes::from_array(&env, &[0u8; 40]); // not 81 bytes
+
+    let Err(Ok(err)) = client.try_request_credit(&borrower, &seal, &short_journal) else {
+        panic!("expected BadJournalLength");
+    };
+    assert_eq!(err, Error::BadJournalLength);
+}
+
+#[test]
+fn request_credit_propagates_verifier_rejection() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let token_admin = Address::generate(&env);
+    let usdc = env.register_stellar_asset_contract_v2(token_admin);
+    let usdc_id = usdc.address();
+    // Router that always rejects, standing in for a real verifier refusing a
+    // proof with the wrong image id or an invalid seal.
+    let router = env.register(RejectingRouter, ());
+    let id = env.register(ZkUnderwrite, ());
+    let client = ZkUnderwriteClient::new(&env, &id);
+    let admin = Address::generate(&env);
+    let image_id = BytesN::from_array(&env, &[7u8; 32]);
+    client.init(&admin, &router, &image_id, &usdc_id, &3000u64, &500_0000000i128);
+    token::StellarAssetClient::new(&env, &usdc_id).mint(&id, &1_000_0000000i128);
+
+    let issuer_hash = [0x11u8; 32];
+    client.register_issuer(&BytesN::from_array(&env, &issuer_hash));
+
+    let borrower = Address::generate(&env);
+    let seal = Bytes::from_array(&env, &[0u8; 4]);
+    let j = journal(&env, issuer_hash, 3000, 1, [0x22u8; 32], 202506);
+
+    // The verifier rejects the proof, so request_credit must fail rather than
+    // silently disbursing credit.
+    let result = client.try_request_credit(&borrower, &seal, &j);
+    assert!(result.is_err());
+    assert_eq!(client.credit_line(&borrower), 0);
+}
+
+#[test]
+fn request_credit_fails_on_insufficient_treasury_balance() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let token_admin = Address::generate(&env);
+    let usdc = env.register_stellar_asset_contract_v2(token_admin);
+    let usdc_id = usdc.address();
+    let router = env.register(StubRouter, ());
+    let id = env.register(ZkUnderwrite, ());
+    let client = ZkUnderwriteClient::new(&env, &id);
+    let admin = Address::generate(&env);
+    let image_id = BytesN::from_array(&env, &[7u8; 32]);
+    let credit = 500_0000000i128;
+    client.init(&admin, &router, &image_id, &usdc_id, &3000u64, &credit);
+
+    let issuer_hash = [0x11u8; 32];
+    client.register_issuer(&BytesN::from_array(&env, &issuer_hash));
+    // Fund the contract treasury with one stroop less than the credit amount.
+    token::StellarAssetClient::new(&env, &usdc_id).mint(&id, &(credit - 1));
+
+    let borrower = Address::generate(&env);
+    let seal = Bytes::from_array(&env, &[0u8; 4]);
+    let j = journal(&env, issuer_hash, 3000, 1, [0x22u8; 32], 202506);
+
+    let result = client.try_request_credit(&borrower, &seal, &j);
+    assert!(result.is_err());
+    assert_eq!(client.credit_line(&borrower), 0);
+}
+
+#[test]
+fn register_issuer_requires_admin_auth() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let id = env.register(ZkUnderwrite, ());
+    let client = ZkUnderwriteClient::new(&env, &id);
+    let (admin, router, usdc, image_id) = setup(&env);
+    client.init(&admin, &router, &image_id, &usdc, &3000u64, &500_0000000i128);
+
+    // No caller has an authorized invocation for this call.
+    env.set_auths(&[]);
+    let issuer_hash = BytesN::from_array(&env, &[9u8; 32]);
+    let result = client.try_register_issuer(&issuer_hash);
+    assert!(result.is_err());
+}
+
+#[test]
+fn request_credit_second_claim_overwrites_credit_line() {
+    // Documents current behavior: each successful claim (with its own unused
+    // nullifier) is allowed, and the stored `CreditLine` for the borrower is
+    // simply overwritten by the latest amount rather than accumulated.
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let token_admin = Address::generate(&env);
+    let usdc = env.register_stellar_asset_contract_v2(token_admin);
+    let usdc_id = usdc.address();
+    let usdc_admin = token::StellarAssetClient::new(&env, &usdc_id);
+    let usdc_token = token::TokenClient::new(&env, &usdc_id);
+
+    let router = env.register(StubRouter, ());
+    let id = env.register(ZkUnderwrite, ());
+    let client = ZkUnderwriteClient::new(&env, &id);
+    let admin = Address::generate(&env);
+    let image_id = BytesN::from_array(&env, &[7u8; 32]);
+    let credit = 500_0000000i128;
+    client.init(&admin, &router, &image_id, &usdc_id, &3000u64, &credit);
+
+    let issuer_hash = [0x11u8; 32];
+    client.register_issuer(&BytesN::from_array(&env, &issuer_hash));
+    usdc_admin.mint(&id, &(credit * 2));
+
+    let borrower = Address::generate(&env);
+    let seal = Bytes::from_array(&env, &[0u8; 4]);
+
+    let j1 = journal(&env, issuer_hash, 3000, 1, [0x22u8; 32], 202506);
+    let granted1 = client.request_credit(&borrower, &seal, &j1);
+    assert_eq!(granted1, credit);
+    assert_eq!(client.credit_line(&borrower), credit);
+
+    // A second claim with a fresh nullifier succeeds again (nothing stops the
+    // same borrower from claiming more than once as long as the nullifier is
+    // new), and overwrites the recorded credit line instead of adding to it.
+    let j2 = journal(&env, issuer_hash, 3000, 1, [0x33u8; 32], 202507);
+    let granted2 = client.request_credit(&borrower, &seal, &j2);
+    assert_eq!(granted2, credit);
+    assert_eq!(client.credit_line(&borrower), credit); // overwritten, not summed
+    assert_eq!(usdc_token.balance(&borrower), credit * 2); // both transfers landed
+}
+
+#[test]
+fn request_credit_emits_credit_event_with_expected_payload() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let token_admin = Address::generate(&env);
+    let usdc = env.register_stellar_asset_contract_v2(token_admin);
+    let usdc_id = usdc.address();
+    let usdc_admin = token::StellarAssetClient::new(&env, &usdc_id);
+
+    let router = env.register(StubRouter, ());
+    let id = env.register(ZkUnderwrite, ());
+    let client = ZkUnderwriteClient::new(&env, &id);
+    let admin = Address::generate(&env);
+    let image_id = BytesN::from_array(&env, &[7u8; 32]);
+    let credit = 500_0000000i128;
+    client.init(&admin, &router, &image_id, &usdc_id, &3000u64, &credit);
+
+    let issuer_hash = [0x11u8; 32];
+    client.register_issuer(&BytesN::from_array(&env, &issuer_hash));
+    usdc_admin.mint(&id, &1_000_0000000i128);
+
+    let borrower = Address::generate(&env);
+    let seal = Bytes::from_array(&env, &[0u8; 4]);
+    let j = journal(&env, issuer_hash, 3000, 1, [0x22u8; 32], 202506);
+
+    let granted = client.request_credit(&borrower, &seal, &j);
+
+    // The contract publishes exactly one event of its own: topics
+    // `(symbol_short!("credit"), borrower)` and data `amount`.
+    let own_events = env.events().all().filter_by_contract(&id);
+    let expected_topics: soroban_sdk::Vec<Val> =
+        (symbol_short!("credit"), borrower.clone()).into_val(&env);
+    let expected_data: Val = granted.into_val(&env);
+    let expected: soroban_sdk::Vec<(Address, soroban_sdk::Vec<Val>, Val)> =
+        vec![&env, (id.clone(), expected_topics, expected_data)];
+    assert_eq!(own_events, expected);
+}
+
+#[test]
 fn journal_readers_roundtrip() {
     let env = Env::default();
     // Build an 81-byte journal: issuer_hash=0x11.., threshold=3000, meets=1,
@@ -185,9 +485,9 @@ fn journal_readers_roundtrip() {
     arr[73..81].copy_from_slice(&202506u64.to_be_bytes());
 
     let journal = Bytes::from_array(&env, &arr);
-    assert_eq!(read_u64_be(&journal, OFF_THRESHOLD), 3000);
+    assert_eq!(read_u64_be(&env, &journal, OFF_THRESHOLD), 3000);
     assert_eq!(journal.get(OFF_MEETS).unwrap(), 1);
-    assert_eq!(read_u64_be(&journal, OFF_PERIOD), 202506);
+    assert_eq!(read_u64_be(&env, &journal, OFF_PERIOD), 202506);
     assert_eq!(
         read_bytes32(&env, &journal, OFF_ISSUER_HASH),
         BytesN::from_array(&env, &[0x11u8; 32])
@@ -196,4 +496,190 @@ fn journal_readers_roundtrip() {
         read_bytes32(&env, &journal, OFF_NULLIFIER),
         BytesN::from_array(&env, &[0x22u8; 32])
     );
+}
+
+#[test]
+fn unregister_then_reregister_issuer_works() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let id = env.register(ZkUnderwrite, ());
+    let client = ZkUnderwriteClient::new(&env, &id);
+    let (admin, router, usdc, image_id) = setup(&env);
+    client.init(&admin, &router, &image_id, &usdc, &3000u64, &500_0000000i128);
+
+    let issuer_hash = BytesN::from_array(&env, &[9u8; 32]);
+    client.register_issuer(&issuer_hash);
+    client.unregister_issuer(&issuer_hash);
+    env.as_contract(&id, || {
+        assert!(!env
+            .storage()
+            .persistent()
+            .has(&DataKey::Issuer(issuer_hash.clone())));
+    });
+
+    // Re-registering the same issuer after revocation must work again.
+    client.register_issuer(&issuer_hash);
+    env.as_contract(&id, || {
+        assert!(env
+            .storage()
+            .persistent()
+            .has(&DataKey::Issuer(issuer_hash.clone())));
+    });
+}
+
+#[test]
+fn unregister_issuer_by_non_admin_fails() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let id = env.register(ZkUnderwrite, ());
+    let client = ZkUnderwriteClient::new(&env, &id);
+    let (admin, router, usdc, image_id) = setup(&env);
+    client.init(&admin, &router, &image_id, &usdc, &3000u64, &500_0000000i128);
+    let issuer_hash = BytesN::from_array(&env, &[9u8; 32]);
+    client.register_issuer(&issuer_hash);
+
+    // An attacker authorizes this exact invocation, but the contract still
+    // requires the stored admin's own authorization -> must fail.
+    let attacker = Address::generate(&env);
+    let result = client
+        .mock_auths(&[MockAuth {
+            address: &attacker,
+            invoke: &MockAuthInvoke {
+                contract: &id,
+                fn_name: "unregister_issuer",
+                args: (issuer_hash.clone(),).into_val(&env),
+                sub_invokes: &[],
+            },
+        }])
+        .try_unregister_issuer(&issuer_hash);
+    assert!(result.is_err());
+    env.as_contract(&id, || {
+        assert!(env
+            .storage()
+            .persistent()
+            .has(&DataKey::Issuer(issuer_hash.clone())));
+    });
+}
+
+#[test]
+fn propose_and_accept_admin_transfers_admin() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let id = env.register(ZkUnderwrite, ());
+    let client = ZkUnderwriteClient::new(&env, &id);
+    let (admin, router, usdc, image_id) = setup(&env);
+    client.init(&admin, &router, &image_id, &usdc, &3000u64, &500_0000000i128);
+
+    let new_admin = Address::generate(&env);
+    client.propose_admin(&new_admin);
+    client.accept_admin();
+
+    env.as_contract(&id, || {
+        let stored_admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        assert_eq!(stored_admin, new_admin);
+        assert!(!env.storage().instance().has(&DataKey::PendingAdmin));
+    });
+}
+
+#[test]
+fn accept_admin_by_wrong_caller_fails() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let id = env.register(ZkUnderwrite, ());
+    let client = ZkUnderwriteClient::new(&env, &id);
+    let (admin, router, usdc, image_id) = setup(&env);
+    client.init(&admin, &router, &image_id, &usdc, &3000u64, &500_0000000i128);
+
+    let new_admin = Address::generate(&env);
+    client.propose_admin(&new_admin);
+
+    // Someone other than the proposed new admin tries to accept.
+    let attacker = Address::generate(&env);
+    let result = client
+        .mock_auths(&[MockAuth {
+            address: &attacker,
+            invoke: &MockAuthInvoke {
+                contract: &id,
+                fn_name: "accept_admin",
+                args: ().into_val(&env),
+                sub_invokes: &[],
+            },
+        }])
+        .try_accept_admin();
+    assert!(result.is_err());
+    env.as_contract(&id, || {
+        let stored_admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        assert_eq!(stored_admin, admin);
+    });
+}
+
+#[test]
+fn cancel_admin_proposal_clears_pending_and_blocks_accept() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let id = env.register(ZkUnderwrite, ());
+    let client = ZkUnderwriteClient::new(&env, &id);
+    let (admin, router, usdc, image_id) = setup(&env);
+    client.init(&admin, &router, &image_id, &usdc, &3000u64, &500_0000000i128);
+
+    let new_admin = Address::generate(&env);
+    client.propose_admin(&new_admin);
+    client.cancel_admin_proposal();
+
+    env.as_contract(&id, || {
+        assert!(!env.storage().instance().has(&DataKey::PendingAdmin));
+    });
+
+    // Nothing is pending anymore, so accepting must fail.
+    let result = client.try_accept_admin();
+    assert!(result.is_err());
+}
+
+#[test]
+fn new_admin_can_act_and_old_admin_cannot() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let id = env.register(ZkUnderwrite, ());
+    let client = ZkUnderwriteClient::new(&env, &id);
+    let (admin, router, usdc, image_id) = setup(&env);
+    client.init(&admin, &router, &image_id, &usdc, &3000u64, &500_0000000i128);
+
+    let new_admin = Address::generate(&env);
+    client.propose_admin(&new_admin);
+    client.accept_admin();
+
+    // The new admin can now register an issuer.
+    let issuer_hash = BytesN::from_array(&env, &[3u8; 32]);
+    client
+        .mock_auths(&[MockAuth {
+            address: &new_admin,
+            invoke: &MockAuthInvoke {
+                contract: &id,
+                fn_name: "register_issuer",
+                args: (issuer_hash.clone(),).into_val(&env),
+                sub_invokes: &[],
+            },
+        }])
+        .register_issuer(&issuer_hash);
+    env.as_contract(&id, || {
+        assert!(env
+            .storage()
+            .persistent()
+            .has(&DataKey::Issuer(issuer_hash.clone())));
+    });
+
+    // The old admin no longer has authority to register an issuer.
+    let other_hash = BytesN::from_array(&env, &[4u8; 32]);
+    let result = client
+        .mock_auths(&[MockAuth {
+            address: &admin,
+            invoke: &MockAuthInvoke {
+                contract: &id,
+                fn_name: "register_issuer",
+                args: (other_hash.clone(),).into_val(&env),
+                sub_invokes: &[],
+            },
+        }])
+        .try_register_issuer(&other_hash);
+    assert!(result.is_err());
 }
