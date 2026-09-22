@@ -39,6 +39,10 @@ pub enum Error {
     ThresholdTooLow = 5,
     IncomeBelowThreshold = 6,
     NullifierAlreadyUsed = 7,
+    InvalidCreditAmount = 8,
+    InvalidThreshold = 9,
+    InvalidImageId = 10,
+    BadJournal = 11,
 }
 
 #[contracttype]
@@ -76,6 +80,15 @@ impl ZkUnderwrite {
         if store.has(&DataKey::Admin) {
             panic_with_error!(&env, Error::AlreadyInitialized);
         }
+        if credit_amount <= 0 {
+            panic_with_error!(&env, Error::InvalidCreditAmount);
+        }
+        if required_threshold == 0 {
+            panic_with_error!(&env, Error::InvalidThreshold);
+        }
+        if expected_image_id == BytesN::from_array(&env, &[0u8; 32]) {
+            panic_with_error!(&env, Error::InvalidImageId);
+        }
         admin.require_auth();
         store.set(&DataKey::Admin, &admin);
         store.set(&DataKey::Router, &router);
@@ -88,7 +101,11 @@ impl ZkUnderwrite {
     /// Register a trusted issuer by the sha256 hash of its Ed25519 public key.
     pub fn register_issuer(env: Env, issuer_pubkey_hash: BytesN<32>) {
         Self::assert_init(&env);
-        let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
         admin.require_auth();
         env.storage()
             .persistent()
@@ -102,23 +119,31 @@ impl ZkUnderwrite {
         Self::assert_init(&env);
         let store = env.storage().instance();
 
-        // 1. Verify the proof, bound to OUR guest image id (never caller-supplied).
-        let image_id: BytesN<32> = store.get(&DataKey::ImageId).unwrap();
-        let router: Address = store.get(&DataKey::Router).unwrap();
-        let journal_digest: BytesN<32> = env.crypto().sha256(&journal).into();
-        RiscZeroVerifierRouterClient::new(&env, &router).verify(&seal, &image_id, &journal_digest);
-
-        // 2. Parse the proven journal bytes.
+        // 1. Check the journal shape BEFORE spending a verifier call on it.
         if journal.len() != JOURNAL_LEN {
             panic_with_error!(&env, Error::BadJournalLength);
         }
-        let issuer_hash = read_bytes32(&env, &journal, OFF_ISSUER_HASH);
-        let threshold = read_u64_be(&journal, OFF_THRESHOLD);
-        let meets = journal.get(OFF_MEETS).unwrap();
-        let nullifier = read_bytes32(&env, &journal, OFF_NULLIFIER);
-        let _period = read_u64_be(&journal, OFF_PERIOD);
 
-        // 3. Policy checks.
+        // 2. Verify the proof, bound to OUR guest image id (never caller-supplied).
+        let image_id: BytesN<32> = store
+            .get(&DataKey::ImageId)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
+        let router: Address = store
+            .get(&DataKey::Router)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
+        let journal_digest: BytesN<32> = env.crypto().sha256(&journal).into();
+        RiscZeroVerifierRouterClient::new(&env, &router).verify(&seal, &image_id, &journal_digest);
+
+        // 3. Parse the proven journal bytes.
+        let issuer_hash = read_bytes32(&env, &journal, OFF_ISSUER_HASH);
+        let threshold = read_u64_be(&env, &journal, OFF_THRESHOLD);
+        let meets = journal
+            .get(OFF_MEETS)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::BadJournal));
+        let nullifier = read_bytes32(&env, &journal, OFF_NULLIFIER);
+        let _period = read_u64_be(&env, &journal, OFF_PERIOD);
+
+        // 4. Policy checks.
         if !env
             .storage()
             .persistent()
@@ -126,7 +151,9 @@ impl ZkUnderwrite {
         {
             panic_with_error!(&env, Error::IssuerNotRegistered);
         }
-        let required: u64 = store.get(&DataKey::RequiredThreshold).unwrap();
+        let required: u64 = store
+            .get(&DataKey::RequiredThreshold)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
         if threshold < required {
             panic_with_error!(&env, Error::ThresholdTooLow);
         }
@@ -139,9 +166,13 @@ impl ZkUnderwrite {
         }
         env.storage().persistent().set(&null_key, &true);
 
-        // 4. Disburse the real testnet USDC credit line from this contract's treasury.
-        let amount: i128 = store.get(&DataKey::CreditAmount).unwrap();
-        let usdc: Address = store.get(&DataKey::Usdc).unwrap();
+        // 5. Disburse the real testnet USDC credit line from this contract's treasury.
+        let amount: i128 = store
+            .get(&DataKey::CreditAmount)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
+        let usdc: Address = store
+            .get(&DataKey::Usdc)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
         token::TokenClient::new(&env, &usdc).transfer(
             &env.current_contract_address(),
             &borrower,
@@ -175,17 +206,22 @@ fn read_bytes32(env: &Env, b: &Bytes, off: u32) -> BytesN<32> {
     let mut arr = [0u8; 32];
     let mut i = 0u32;
     while i < 32 {
-        arr[i as usize] = b.get(off + i).unwrap();
+        arr[i as usize] = b
+            .get(off + i)
+            .unwrap_or_else(|| panic_with_error!(env, Error::BadJournal));
         i += 1;
     }
     BytesN::from_array(env, &arr)
 }
 
-fn read_u64_be(b: &Bytes, off: u32) -> u64 {
+fn read_u64_be(env: &Env, b: &Bytes, off: u32) -> u64 {
     let mut v: u64 = 0;
     let mut i = 0u32;
     while i < 8 {
-        v = (v << 8) | (b.get(off + i).unwrap() as u64);
+        v = (v << 8)
+            | (b
+                .get(off + i)
+                .unwrap_or_else(|| panic_with_error!(env, Error::BadJournal)) as u64);
         i += 1;
     }
     v
