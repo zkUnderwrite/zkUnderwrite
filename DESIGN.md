@@ -74,7 +74,7 @@ Steps:
 6. `issuer_pubkey_hash = sha256(issuer_pubkey)`.
 7. Commit the **journal** (fixed 81-byte layout below). No raw amounts leave the device.
 
-## Journal byte layout (89 → 81 bytes, big-endian, fixed)
+## Journal byte layout (81 bytes, big-endian, fixed)
 
 | Offset | Len | Field                  | Notes                                  |
 |--------|-----|------------------------|----------------------------------------|
@@ -107,13 +107,15 @@ Functions:
   7. Require `!nullifiers.contains(nullifier)`; insert it.
   8. Set `credit_lines[borrower] = credit_amount`; transfer `credit_amount` of
      real testnet USDC from the contract treasury to `borrower` (TokenClient).
-  9. Emit `CreditGranted(borrower, credit_amount, period)`.
+  9. Publish an event with topics `("credit", borrower)` and data
+     `credit_amount` (`env.events().publish((symbol_short!("credit"), borrower),
+     credit_amount)`). The event does not carry `period`.
 
 ## Components & layout
 
 ```
 zkunderwrite/
-  Dockerfile.risc0        # linux/amd64 RISC Zero 3.0.0 build/prove env (Intel-Mac fix)
+  Dockerfile.risc0        # linux/amd64 RISC Zero 3.0.5 build/prove env (Intel-Mac fix)
   reference-verifier/     # forked NethermindEth/stellar-risc0-verifier
   methods/                # RISC Zero guest (income proof) + build
   host/                   # borrower CLI: build proof.txt (seal,image_id,journal)
@@ -122,8 +124,37 @@ zkunderwrite/
   app/                    # minimal lender dashboard (reads contract state)
 ```
 
+## Building the contract for `wasm32v1-none`
+
+The contract is built natively (no RISC Zero container required — that is only
+needed for the guest/proving side). The repository root `rust-toolchain.toml`
+pins the toolchain used for this build:
+
+```toml
+[toolchain]
+channel = "stable"
+components = ["rustfmt", "clippy"]
+targets = ["wasm32v1-none"]
+```
+
+`rustup` reads this file automatically, so running `rustup show active-toolchain
+|| rustup toolchain install` from the repo (as CI does) installs a stable Rust
+with the `wasm32v1-none` target and `rustfmt`/`clippy` components. Then build
+the contract release wasm directly with Cargo:
+
+```bash
+cd contracts/zkunderwrite
+cargo build --release --target wasm32v1-none
+```
+
+This is the same command the `wasm` job in `.github/workflows/ci.yml` runs.
+Equivalently, the Stellar CLI wraps the same target with extra
+optimization/metadata handling (`cd contracts/zkunderwrite && stellar contract
+build --optimize`); testnet deployments in this repo used Stellar CLI 25.2.0
+(see [`DEPLOYMENTS.md`](DEPLOYMENTS.md)).
+
 ## Open verification items (Day 1 gate)
 
-- Confirm RISC Zero 3.0.0 proof verifies against the deployed verifier (control-root match).
+- Confirm RISC Zero 3.0.5 proof verifies against the deployed verifier (control-root match).
 - Confirm `soroban-sdk 25.1.0` verifier builds & deploys against testnet (Protocol 27).
 - Measure real proving time, Groth16 seal size, and on-chain verify tx cost.
