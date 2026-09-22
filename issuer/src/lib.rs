@@ -242,3 +242,83 @@ fn restrict_permissions(_path: &Path) -> Result<(), IssuerError> {
     Ok(())
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_incomes_accepts_exactly_three_values() {
+        let raw = vec!["100".to_string(), "200".to_string(), "300".to_string()];
+        let parsed = parse_incomes(&raw).unwrap();
+        assert_eq!(parsed, vec![100, 200, 300]);
+    }
+
+    #[test]
+    fn parse_incomes_rejects_too_few() {
+        let raw = vec!["100".to_string(), "200".to_string()];
+        let err = parse_incomes(&raw).unwrap_err();
+        assert!(matches!(
+            err,
+            IssuerError::InvalidMonthCount {
+                expected: 3,
+                actual: 2
+            }
+        ));
+    }
+
+    #[test]
+    fn parse_incomes_rejects_too_many() {
+        let raw = vec![
+            "100".to_string(),
+            "200".to_string(),
+            "300".to_string(),
+            "400".to_string(),
+        ];
+        let err = parse_incomes(&raw).unwrap_err();
+        assert!(matches!(
+            err,
+            IssuerError::InvalidMonthCount {
+                expected: 3,
+                actual: 4
+            }
+        ));
+    }
+
+    #[test]
+    fn parse_incomes_rejects_non_numeric_value_without_panicking() {
+        let raw = vec!["100".to_string(), "oops".to_string(), "300".to_string()];
+        let err = parse_incomes(&raw).unwrap_err();
+        assert!(matches!(err, IssuerError::InvalidIncome { .. }));
+    }
+
+    #[test]
+    fn statement_serialization_matches_the_guest_wire_format() {
+        // This is the exact byte layout `zkvm/methods/guest/src/main.rs`
+        // deserializes with `serde_json::from_slice`. Field order here
+        // mirrors the guest's `Statement` struct; changing either without
+        // the other would silently break proving.
+        let st = build_statement(
+            "acct_4f9c2a17".to_string(),
+            "bank-of-stellar".to_string(),
+            vec![4200, 4250, 4180],
+            1_750_550_400,
+        );
+        let bytes = serialize_statement(&st).unwrap();
+        let expected: &[u8] = br#"{"schema":"zku.income.v1","subject_id":"acct_4f9c2a17","issuer":"bank-of-stellar","currency":"USD","issued_at":1750550400,"period_months":3,"monthly_net_income":[4200,4250,4180]}"#;
+        assert_eq!(bytes, expected);
+    }
+
+    #[test]
+    fn statement_round_trips_through_serde_json() {
+        let st = build_statement("s".to_string(), "i".to_string(), vec![1, 2, 3], 42);
+        let bytes = serialize_statement(&st).unwrap();
+        let decoded: Statement = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(decoded, st);
+    }
+
+    #[test]
+    fn period_months_always_matches_income_len() {
+        let st = build_statement("s".to_string(), "i".to_string(), vec![1, 2, 3], 42);
+        assert_eq!(st.period_months as usize, st.monthly_net_income.len());
+    }
+}
