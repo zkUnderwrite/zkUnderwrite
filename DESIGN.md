@@ -39,25 +39,38 @@ canonicalization ambiguity arises.
   "issuer": "bank-of-stellar",
   "currency": "USD",
   "issued_at": 1750550400,
+  "period": 202506,
   "period_months": 3,
   "monthly_net_income": [4200, 4250, 4180]
 }
 ```
 
 - `subject_id`: opaque, issuer-scoped account id → feeds the nullifier (never revealed on-chain).
+- `period`: the issuer-attested billing/calendar period (e.g. `yyyymm`) this
+  statement covers → feeds the nullifier and the journal's `period` field. It
+  is signed by the issuer, so the guest never trusts a host-supplied period —
+  the same signed statement always yields the same period and therefore the
+  same nullifier, closing a replay path where a borrower could otherwise
+  re-run the prover with a different period against one signed statement.
 - `monthly_net_income`: last N months net income, whole currency units.
 
 ## Guest program (off-chain, RISC Zero, Rust)
 
 Private input: `statement_bytes`, `signature[64]`, `issuer_pubkey[32]`.
-Public params (also committed): `threshold: u64`, `period: u64`.
+Public param (also committed): `threshold: u64`. `period` is **not** a host
+input — it is read from the parsed, signature-verified statement
+(`statement.period`), never from the host, so it cannot be varied across
+proving runs of the same signed statement.
 
 Steps:
 1. `ed25519_dalek::verify(issuer_pubkey, statement_bytes, signature)` → panic on failure (no proof).
-2. Parse `statement_bytes` (serde_json) → fields.
+2. Parse `statement_bytes` (serde_json) → fields, including the signed `period`.
 3. `avg = sum(monthly_net_income) / period_months`; `recurring = all months > 0`.
 4. `income_meets_threshold = recurring && avg >= threshold`.
-5. `nullifier = sha256(subject_id || "|" || issuer || "|" || period_le)`.
+5. `nullifier = sha256(len(subject_id) || subject_id || len(issuer) || issuer || period_be)`,
+   with each string's length written as a 4-byte big-endian prefix so the
+   join is injective (a raw `subject_id || issuer` join is not, if either
+   field could contain a shared separator byte).
 6. `issuer_pubkey_hash = sha256(issuer_pubkey)`.
 7. Commit the **journal** (fixed 81-byte layout below). No raw amounts leave the device.
 
@@ -69,7 +82,7 @@ Steps:
 | 32     | 8   | `threshold` (u64 BE)   | the income threshold that was proven   |
 | 40     | 1   | `income_meets_threshold` | 0 / 1                                |
 | 41     | 32  | `nullifier`            | sha256; replay/Sybil guard             |
-| 73     | 8   | `period` (u64 BE)      | e.g. yyyymm; scopes the nullifier      |
+| 73     | 8   | `period` (u64 BE)      | e.g. yyyymm; signed by the issuer, scopes the nullifier |
 
 Total: **81 bytes.** Only a boolean is revealed about the income — never the
 amount. (`journal_digest = sha256(these 81 bytes)`.)
