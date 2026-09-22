@@ -28,6 +28,26 @@ const OFF_MEETS: u32 = 40; // [40] u8
 const OFF_NULLIFIER: u32 = 41; // [41,73)
 const OFF_PERIOD: u32 = 73; // [73,81) u64 BE
 
+/// One Stellar ledger closes roughly every 5 seconds, so ~17280 ledgers per day.
+const DAY_IN_LEDGERS: u32 = 17280;
+
+/// Instance storage (`admin`, `router`, `expected_image_id`, `usdc`,
+/// `required_threshold`, `credit_amount`) is read on every call, so it must
+/// never be allowed to expire. Bump it whenever its remaining TTL drops below
+/// 7 days, extending it back out to 30 days.
+const INSTANCE_TTL_THRESHOLD: u32 = 7 * DAY_IN_LEDGERS;
+const INSTANCE_TTL_EXTEND_TO: u32 = 30 * DAY_IN_LEDGERS;
+
+/// Issuer registry entries and spent nullifiers are persistent storage and
+/// must survive long gaps between admin/borrower activity: an expired issuer
+/// entry silently un-registers a trusted issuer, and an expired nullifier
+/// entry would let a previously-used proof be replayed. Bump whenever the
+/// remaining TTL drops below 30 days, extending it out to 365 days (well
+/// under the network max, but long enough to only need periodic renewal on
+/// use rather than every call).
+const PERSISTENT_TTL_THRESHOLD: u32 = 30 * DAY_IN_LEDGERS;
+const PERSISTENT_TTL_EXTEND_TO: u32 = 365 * DAY_IN_LEDGERS;
+
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 #[repr(u32)]
@@ -83,16 +103,24 @@ impl ZkUnderwrite {
         store.set(&DataKey::Usdc, &usdc);
         store.set(&DataKey::RequiredThreshold, &required_threshold);
         store.set(&DataKey::CreditAmount, &credit_amount);
+        store.extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
     }
 
     /// Register a trusted issuer by the sha256 hash of its Ed25519 public key.
     pub fn register_issuer(env: Env, issuer_pubkey_hash: BytesN<32>) {
         Self::assert_init(&env);
-        let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        let store = env.storage().instance();
+        let admin: Address = store.get(&DataKey::Admin).unwrap();
         admin.require_auth();
-        env.storage()
-            .persistent()
-            .set(&DataKey::Issuer(issuer_pubkey_hash), &true);
+        store.extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
+
+        let issuer_key = DataKey::Issuer(issuer_pubkey_hash);
+        env.storage().persistent().set(&issuer_key, &true);
+        env.storage().persistent().extend_ttl(
+            &issuer_key,
+            PERSISTENT_TTL_THRESHOLD,
+            PERSISTENT_TTL_EXTEND_TO,
+        );
     }
 
     /// Verify an income proof and, if valid and policy-compliant, disburse the
@@ -101,6 +129,7 @@ impl ZkUnderwrite {
         borrower.require_auth();
         Self::assert_init(&env);
         let store = env.storage().instance();
+        store.extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
 
         // 1. Verify the proof, bound to OUR guest image id (never caller-supplied).
         let image_id: BytesN<32> = store.get(&DataKey::ImageId).unwrap();
@@ -119,13 +148,15 @@ impl ZkUnderwrite {
         let _period = read_u64_be(&journal, OFF_PERIOD);
 
         // 3. Policy checks.
-        if !env
-            .storage()
-            .persistent()
-            .has(&DataKey::Issuer(issuer_hash))
-        {
+        let issuer_key = DataKey::Issuer(issuer_hash);
+        if !env.storage().persistent().has(&issuer_key) {
             panic_with_error!(&env, Error::IssuerNotRegistered);
         }
+        env.storage().persistent().extend_ttl(
+            &issuer_key,
+            PERSISTENT_TTL_THRESHOLD,
+            PERSISTENT_TTL_EXTEND_TO,
+        );
         let required: u64 = store.get(&DataKey::RequiredThreshold).unwrap();
         if threshold < required {
             panic_with_error!(&env, Error::ThresholdTooLow);
@@ -138,6 +169,11 @@ impl ZkUnderwrite {
             panic_with_error!(&env, Error::NullifierAlreadyUsed);
         }
         env.storage().persistent().set(&null_key, &true);
+        env.storage().persistent().extend_ttl(
+            &null_key,
+            PERSISTENT_TTL_THRESHOLD,
+            PERSISTENT_TTL_EXTEND_TO,
+        );
 
         // 4. Disburse the real testnet USDC credit line from this contract's treasury.
         let amount: i128 = store.get(&DataKey::CreditAmount).unwrap();
