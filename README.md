@@ -133,6 +133,23 @@ zkunderwrite/
   DESIGN.md  DEPLOYMENTS.md
 ```
 
+## Cargo roots
+
+There is no root Cargo workspace. The repository has five independent Cargo
+roots, each built from its own directory:
+
+| Root | Builds | How to build |
+|---|---|---|
+| `issuer/` | `zku-issuer`, the Ed25519 issuer CLI (`keygen`, `sign`) | `cd issuer && cargo build --release` |
+| `zkvm/` | workspace of `host` (borrower CLI that proves and emits the Groth16 receipt) and `methods` (embeds the guest and its image id) | inside the RISC Zero container: `cd zkvm && cargo build --release -p host` |
+| `zkvm/methods/guest/` | `zku-guest`, the zkVM guest. It declares its own `[workspace]` and is compiled for the zkVM target by `methods/build.rs` via `risc0-build` | built automatically as part of the `zkvm/` build, not by hand |
+| `contracts/zkunderwrite/` | the Soroban app contract (`zkunderwrite.wasm`) | `cd contracts/zkunderwrite && stellar contract build` |
+| `reference-verifier/` | vendored Nethermind verifier stack (router, Groth16 verifier, timelock, emergency stop) | see `reference-verifier/README.md` |
+
+`Cargo.lock` is committed for `issuer/`, `zkvm/` and `contracts/zkunderwrite/`
+so their builds are reproducible. The vendored `reference-verifier/` and the
+detached `zkvm/methods/guest/` crate keep their lockfiles ignored.
+
 ## Running it
 
 **Build/prove environment.** The RISC Zero toolchain (`rzup`) ships no Intel-macOS

@@ -2,6 +2,11 @@
 target/
 **/target/
 Cargo.lock
+# ...but track lockfiles for the binary crates (reproducible builds).
+# reference-verifier/ (vendored) and zkvm/methods/guest keep theirs ignored.
+!/issuer/Cargo.lock
+!/zkvm/Cargo.lock
+!/contracts/zkunderwrite/Cargo.lock
 
 # RISC Zero / proving outputs
 proof.txt
