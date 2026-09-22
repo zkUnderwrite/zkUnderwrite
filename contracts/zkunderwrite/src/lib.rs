@@ -43,12 +43,14 @@ pub enum Error {
     InvalidThreshold = 9,
     InvalidImageId = 10,
     BadJournal = 11,
+    NoPendingAdmin = 12,
 }
 
 #[contracttype]
 #[derive(Clone)]
 pub enum DataKey {
     Admin,
+    PendingAdmin,
     Router,
     ImageId,
     Usdc,
@@ -109,7 +111,77 @@ impl ZkUnderwrite {
         admin.require_auth();
         env.storage()
             .persistent()
-            .set(&DataKey::Issuer(issuer_pubkey_hash), &true);
+            .set(&DataKey::Issuer(issuer_pubkey_hash.clone()), &true);
+        env.events()
+            .publish((symbol_short!("iss_reg"), issuer_pubkey_hash), admin);
+    }
+
+    /// Revoke a previously registered issuer by the sha256 hash of its Ed25519
+    /// public key. Admin only. Removing an issuer that was never registered is
+    /// a no-op, matching `register_issuer`'s idempotent set.
+    pub fn unregister_issuer(env: Env, issuer_hash: BytesN<32>) {
+        Self::assert_init(&env);
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
+        admin.require_auth();
+        env.storage()
+            .persistent()
+            .remove(&DataKey::Issuer(issuer_hash.clone()));
+        env.events()
+            .publish((symbol_short!("iss_unreg"), issuer_hash), admin);
+    }
+
+    /// Step 1 of admin rotation: the current admin proposes `new_admin`. The
+    /// transfer only completes once `new_admin` calls `accept_admin`, so a
+    /// typo'd or unreachable address can never brick admin control.
+    pub fn propose_admin(env: Env, new_admin: Address) {
+        Self::assert_init(&env);
+        let store = env.storage().instance();
+        let admin: Address = store
+            .get(&DataKey::Admin)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
+        admin.require_auth();
+        store.set(&DataKey::PendingAdmin, &new_admin);
+        env.events()
+            .publish((symbol_short!("adm_prop"), admin), new_admin);
+    }
+
+    /// Step 2 of admin rotation: the proposed address proves control by
+    /// authorizing this call itself, then becomes the new admin.
+    pub fn accept_admin(env: Env) {
+        Self::assert_init(&env);
+        let store = env.storage().instance();
+        let pending: Address = store
+            .get(&DataKey::PendingAdmin)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NoPendingAdmin));
+        pending.require_auth();
+        let old_admin: Address = store
+            .get(&DataKey::Admin)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
+        store.set(&DataKey::Admin, &pending);
+        store.remove(&DataKey::PendingAdmin);
+        env.events()
+            .publish((symbol_short!("adm_acc"), old_admin), pending);
+    }
+
+    /// Let the current admin withdraw a pending proposal before it is
+    /// accepted, e.g. after proposing the wrong address.
+    pub fn cancel_admin_proposal(env: Env) {
+        Self::assert_init(&env);
+        let store = env.storage().instance();
+        let admin: Address = store
+            .get(&DataKey::Admin)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
+        admin.require_auth();
+        let pending: Address = store
+            .get(&DataKey::PendingAdmin)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NoPendingAdmin));
+        store.remove(&DataKey::PendingAdmin);
+        env.events()
+            .publish((symbol_short!("adm_cncl"), admin), pending);
     }
 
     /// Verify an income proof and, if valid and policy-compliant, disburse the
