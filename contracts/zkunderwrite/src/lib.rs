@@ -32,12 +32,19 @@ const OFF_PERIOD: u32 = 73; // [73,81) u64 BE
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 #[repr(u32)]
 pub enum Error {
+    /// `init` has not been called yet, so no policy/state is set.
     NotInitialized = 1,
+    /// `init` was called a second time; the contract can only be initialized once.
     AlreadyInitialized = 2,
+    /// The proven `journal` was not exactly `JOURNAL_LEN` (81) bytes.
     BadJournalLength = 3,
+    /// The journal's `issuer_pubkey_hash` is not in the registered-issuer set.
     IssuerNotRegistered = 4,
+    /// The proven `threshold` is below this lender's `required_threshold`.
     ThresholdTooLow = 5,
+    /// The journal's `income_meets_threshold` flag was `0` (not met).
     IncomeBelowThreshold = 6,
+    /// The journal's `nullifier` has already been spent (replay/Sybil guard).
     NullifierAlreadyUsed = 7,
 }
 
