@@ -182,3 +182,9 @@ cd app && python3 -m http.server 8731   # open http://localhost:8731
 - **Chain:** Stellar / Soroban (Protocol 26+ BN254 host functions), `soroban-sdk` 25.
 - **Crypto in-guest:** Ed25519 signature verification, SHA-256.
 - **Token:** real testnet USDC via a Stellar Asset Contract.
+
+## Contributing
+
+See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the development setup and how
+the Cargo roots are checked in CI. This project follows the
+[Contributor Covenant](CODE_OF_CONDUCT.md).
