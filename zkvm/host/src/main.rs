@@ -29,10 +29,11 @@ fn main() {
         .unwrap_or_else(|_| "3000".into())
         .parse()
         .unwrap();
-    let period: u64 = std::env::var("PERIOD")
-        .unwrap_or_else(|_| "202506".into())
-        .parse()
-        .unwrap();
+    // `period` is NOT a host input: it is signed inside statement.json and the
+    // guest reads it from the parsed, signature-verified statement instead.
+    // Removing it here closes a nullifier-replay path where a borrower could
+    // re-run the prover with a different PERIOD against the same signed
+    // statement to mint a fresh nullifier.
 
     let exec_env = ExecutorEnv::builder()
         .write(&statement)
@@ -42,8 +43,6 @@ fn main() {
         .write(&issuer_pk)
         .unwrap()
         .write(&threshold)
-        .unwrap()
-        .write(&period)
         .unwrap()
         .build()
         .unwrap();

@@ -15,17 +15,20 @@ struct Statement {
     currency: String,
     #[allow(dead_code)]
     issued_at: u64,
+    period: u64,
     period_months: u32,
     monthly_net_income: Vec<u64>,
 }
 
 fn main() {
-    // Inputs (written by host, in this order).
+    // Inputs (written by host, in this order). `period` is intentionally NOT
+    // a host input: it must come from the signed statement (see below), so a
+    // borrower cannot mint a fresh nullifier by re-running the prover with a
+    // different period on the same signed statement.
     let statement_bytes: Vec<u8> = env::read();
     let signature_bytes: Vec<u8> = env::read(); // 64 bytes
     let issuer_pubkey_bytes: Vec<u8> = env::read(); // 32 bytes
     let threshold: u64 = env::read();
-    let period: u64 = env::read();
 
     // 1) Verify the issuer's Ed25519 signature over the EXACT statement bytes.
     let pk: [u8; 32] = issuer_pubkey_bytes
@@ -55,13 +58,19 @@ fn main() {
     let recurring = st.monthly_net_income.iter().all(|&m| m > 0);
     let meets = recurring && avg >= threshold;
 
-    // 4) Nullifier (no identity revealed): sha256(subject_id | issuer | period_le).
+    // 4) Nullifier (no identity revealed): sha256 over length-prefixed fields
+    // so variable-length `subject_id`/`issuer` values cannot be shifted across
+    // the field boundary to collide two logically different pre-images (a
+    // plain `|`-join is not injective if either field may contain `|`).
+    // `period` comes from the signature-verified statement, not a host input,
+    // so it cannot be varied by re-running the prover on the same statement.
+    let period = st.period;
     let mut h = Sha256::new();
+    h.update((st.subject_id.len() as u32).to_be_bytes());
     h.update(st.subject_id.as_bytes());
-    h.update(b"|");
+    h.update((st.issuer.len() as u32).to_be_bytes());
     h.update(st.issuer.as_bytes());
-    h.update(b"|");
-    h.update(period.to_le_bytes());
+    h.update(period.to_be_bytes());
     let nullifier: [u8; 32] = h.finalize().into();
 
     let issuer_hash: [u8; 32] = Sha256::digest(&issuer_pubkey_bytes).into();
