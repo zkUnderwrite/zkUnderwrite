@@ -2,8 +2,8 @@
 use super::*;
 use soroban_sdk::{
     contract, contractimpl,
-    testutils::Address as _,
-    token, Address, Bytes, BytesN, Env,
+    testutils::{Address as _, MockAuth, MockAuthInvoke},
+    token, Address, Bytes, BytesN, Env, IntoVal,
 };
 
 /// Stub verifier-router that always accepts — stands in for the deployed RISC
@@ -264,4 +264,190 @@ fn journal_readers_roundtrip() {
         read_bytes32(&env, &journal, OFF_NULLIFIER),
         BytesN::from_array(&env, &[0x22u8; 32])
     );
+}
+
+#[test]
+fn unregister_then_reregister_issuer_works() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let id = env.register(ZkUnderwrite, ());
+    let client = ZkUnderwriteClient::new(&env, &id);
+    let (admin, router, usdc, image_id) = setup(&env);
+    client.init(&admin, &router, &image_id, &usdc, &3000u64, &500_0000000i128);
+
+    let issuer_hash = BytesN::from_array(&env, &[9u8; 32]);
+    client.register_issuer(&issuer_hash);
+    client.unregister_issuer(&issuer_hash);
+    env.as_contract(&id, || {
+        assert!(!env
+            .storage()
+            .persistent()
+            .has(&DataKey::Issuer(issuer_hash.clone())));
+    });
+
+    // Re-registering the same issuer after revocation must work again.
+    client.register_issuer(&issuer_hash);
+    env.as_contract(&id, || {
+        assert!(env
+            .storage()
+            .persistent()
+            .has(&DataKey::Issuer(issuer_hash.clone())));
+    });
+}
+
+#[test]
+fn unregister_issuer_by_non_admin_fails() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let id = env.register(ZkUnderwrite, ());
+    let client = ZkUnderwriteClient::new(&env, &id);
+    let (admin, router, usdc, image_id) = setup(&env);
+    client.init(&admin, &router, &image_id, &usdc, &3000u64, &500_0000000i128);
+    let issuer_hash = BytesN::from_array(&env, &[9u8; 32]);
+    client.register_issuer(&issuer_hash);
+
+    // An attacker authorizes this exact invocation, but the contract still
+    // requires the stored admin's own authorization -> must fail.
+    let attacker = Address::generate(&env);
+    let result = client
+        .mock_auths(&[MockAuth {
+            address: &attacker,
+            invoke: &MockAuthInvoke {
+                contract: &id,
+                fn_name: "unregister_issuer",
+                args: (issuer_hash.clone(),).into_val(&env),
+                sub_invokes: &[],
+            },
+        }])
+        .try_unregister_issuer(&issuer_hash);
+    assert!(result.is_err());
+    env.as_contract(&id, || {
+        assert!(env
+            .storage()
+            .persistent()
+            .has(&DataKey::Issuer(issuer_hash.clone())));
+    });
+}
+
+#[test]
+fn propose_and_accept_admin_transfers_admin() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let id = env.register(ZkUnderwrite, ());
+    let client = ZkUnderwriteClient::new(&env, &id);
+    let (admin, router, usdc, image_id) = setup(&env);
+    client.init(&admin, &router, &image_id, &usdc, &3000u64, &500_0000000i128);
+
+    let new_admin = Address::generate(&env);
+    client.propose_admin(&new_admin);
+    client.accept_admin();
+
+    env.as_contract(&id, || {
+        let stored_admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        assert_eq!(stored_admin, new_admin);
+        assert!(!env.storage().instance().has(&DataKey::PendingAdmin));
+    });
+}
+
+#[test]
+fn accept_admin_by_wrong_caller_fails() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let id = env.register(ZkUnderwrite, ());
+    let client = ZkUnderwriteClient::new(&env, &id);
+    let (admin, router, usdc, image_id) = setup(&env);
+    client.init(&admin, &router, &image_id, &usdc, &3000u64, &500_0000000i128);
+
+    let new_admin = Address::generate(&env);
+    client.propose_admin(&new_admin);
+
+    // Someone other than the proposed new admin tries to accept.
+    let attacker = Address::generate(&env);
+    let result = client
+        .mock_auths(&[MockAuth {
+            address: &attacker,
+            invoke: &MockAuthInvoke {
+                contract: &id,
+                fn_name: "accept_admin",
+                args: ().into_val(&env),
+                sub_invokes: &[],
+            },
+        }])
+        .try_accept_admin();
+    assert!(result.is_err());
+    env.as_contract(&id, || {
+        let stored_admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        assert_eq!(stored_admin, admin);
+    });
+}
+
+#[test]
+fn cancel_admin_proposal_clears_pending_and_blocks_accept() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let id = env.register(ZkUnderwrite, ());
+    let client = ZkUnderwriteClient::new(&env, &id);
+    let (admin, router, usdc, image_id) = setup(&env);
+    client.init(&admin, &router, &image_id, &usdc, &3000u64, &500_0000000i128);
+
+    let new_admin = Address::generate(&env);
+    client.propose_admin(&new_admin);
+    client.cancel_admin_proposal();
+
+    env.as_contract(&id, || {
+        assert!(!env.storage().instance().has(&DataKey::PendingAdmin));
+    });
+
+    // Nothing is pending anymore, so accepting must fail.
+    let result = client.try_accept_admin();
+    assert!(result.is_err());
+}
+
+#[test]
+fn new_admin_can_act_and_old_admin_cannot() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let id = env.register(ZkUnderwrite, ());
+    let client = ZkUnderwriteClient::new(&env, &id);
+    let (admin, router, usdc, image_id) = setup(&env);
+    client.init(&admin, &router, &image_id, &usdc, &3000u64, &500_0000000i128);
+
+    let new_admin = Address::generate(&env);
+    client.propose_admin(&new_admin);
+    client.accept_admin();
+
+    // The new admin can now register an issuer.
+    let issuer_hash = BytesN::from_array(&env, &[3u8; 32]);
+    client
+        .mock_auths(&[MockAuth {
+            address: &new_admin,
+            invoke: &MockAuthInvoke {
+                contract: &id,
+                fn_name: "register_issuer",
+                args: (issuer_hash.clone(),).into_val(&env),
+                sub_invokes: &[],
+            },
+        }])
+        .register_issuer(&issuer_hash);
+    env.as_contract(&id, || {
+        assert!(env
+            .storage()
+            .persistent()
+            .has(&DataKey::Issuer(issuer_hash.clone())));
+    });
+
+    // The old admin no longer has authority to register an issuer.
+    let other_hash = BytesN::from_array(&env, &[4u8; 32]);
+    let result = client
+        .mock_auths(&[MockAuth {
+            address: &admin,
+            invoke: &MockAuthInvoke {
+                contract: &id,
+                fn_name: "register_issuer",
+                args: (other_hash.clone(),).into_val(&env),
+                sub_invokes: &[],
+            },
+        }])
+        .try_register_issuer(&other_hash);
+    assert!(result.is_err());
 }
