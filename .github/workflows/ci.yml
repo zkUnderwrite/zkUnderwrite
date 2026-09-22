@@ -1,0 +1,117 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "contracts/zkunderwrite/**"
+      - "issuer/**"
+      - "reference-verifier/contracts/interface/**"
+      - "rust-toolchain.toml"
+      - ".github/workflows/ci.yml"
+  pull_request:
+    paths:
+      - "contracts/zkunderwrite/**"
+      - "issuer/**"
+      - "reference-verifier/contracts/interface/**"
+      - "rust-toolchain.toml"
+      - ".github/workflows/ci.yml"
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+# The zkvm crate (RISC Zero host and guest) is intentionally not built here:
+# it needs rzup and Docker. reference-verifier is vendored and has its own
+# workspace, so only its interface crate (a path dependency of the contract)
+# is exercised, through the contract jobs.
+jobs:
+  check:
+    name: ${{ matrix.crate }} (fmt, clippy, test)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The contract still uses the deprecated Events::publish (lib.rs) and
+          # has inconsistent digit grouping in test.rs. Fixing either means
+          # touching contract code, which is out of scope here, so those two
+          # lints are allowed until follow-up fixes land. Everything else is
+          # still denied.
+          - crate: contracts/zkunderwrite
+            clippy_allow: -A deprecated -A clippy::inconsistent_digit_grouping
+          - crate: issuer
+            clippy_allow: ""
+    defaults:
+      run:
+        working-directory: ${{ matrix.crate }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain from rust-toolchain.toml
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ${{ matrix.crate }}
+          # Cargo.lock is gitignored, so key the cache on the manifests.
+          cache-on-failure: true
+      # Existing sources (contract lib.rs/test.rs, issuer main.rs) are not
+      # rustfmt-clean yet. Reformatting them here would conflict with open
+      # work, so the check reports but does not fail the job. Drop
+      # continue-on-error once a formatting-only PR lands.
+      - name: Format
+        run: cargo fmt --check
+        continue-on-error: true
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings ${{ matrix.clippy_allow }}
+      - name: Test
+        run: cargo test
+
+  wasm:
+    name: contract wasm32v1-none release build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: contracts/zkunderwrite
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain from rust-toolchain.toml
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: contracts/zkunderwrite
+          cache-on-failure: true
+      - name: Build
+        run: cargo build --release --target wasm32v1-none
+
+  audit:
+    name: cargo audit
+    runs-on: ubuntu-latest
+    # Advisories in vendored or transitive dependencies (for example the
+    # reference-verifier ark-* crates) are not fixable from this repo, so the
+    # report is informational and does not block merges.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain from rust-toolchain.toml
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            contracts/zkunderwrite
+            issuer
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+      # Cargo.lock files are gitignored, so resolve them before auditing.
+      - name: Audit contract
+        run: cargo generate-lockfile && cargo audit
+        working-directory: contracts/zkunderwrite
+      - name: Audit issuer
+        run: cargo generate-lockfile && cargo audit
+        working-directory: issuer
