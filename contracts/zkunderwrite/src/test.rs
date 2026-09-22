@@ -71,6 +71,74 @@ fn double_init_panics() {
 }
 
 #[test]
+fn init_rejects_zero_credit_amount() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let id = env.register(ZkUnderwrite, ());
+    let client = ZkUnderwriteClient::new(&env, &id);
+    let (admin, router, usdc, image_id) = setup(&env);
+
+    let result = client.try_init(&admin, &router, &image_id, &usdc, &3000u64, &0i128);
+    assert!(result.is_err());
+}
+
+#[test]
+fn init_rejects_zero_threshold() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let id = env.register(ZkUnderwrite, ());
+    let client = ZkUnderwriteClient::new(&env, &id);
+    let (admin, router, usdc, image_id) = setup(&env);
+
+    let result = client.try_init(&admin, &router, &image_id, &usdc, &0u64, &500_0000000i128);
+    assert!(result.is_err());
+}
+
+#[test]
+fn init_rejects_all_zero_image_id() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let id = env.register(ZkUnderwrite, ());
+    let client = ZkUnderwriteClient::new(&env, &id);
+    let (admin, router, usdc, _image_id) = setup(&env);
+    let zero_image_id = BytesN::from_array(&env, &[0u8; 32]);
+
+    let result = client.try_init(&admin, &router, &zero_image_id, &usdc, &3000u64, &500_0000000i128);
+    assert!(result.is_err());
+}
+
+#[test]
+fn request_credit_rejects_bad_journal_length() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let token_admin = Address::generate(&env);
+    let usdc = env.register_stellar_asset_contract_v2(token_admin.clone());
+    let usdc_id = usdc.address();
+    let router = env.register(StubRouter, ());
+    let id = env.register(ZkUnderwrite, ());
+    let client = ZkUnderwriteClient::new(&env, &id);
+    let (admin, _r, _u, image_id) = setup(&env);
+    client.init(&admin, &router, &image_id, &usdc_id, &3000u64, &500_0000000i128);
+
+    let borrower = Address::generate(&env);
+    let seal = Bytes::from_array(&env, &[0u8; 4]);
+    let short_journal = Bytes::from_array(&env, &[0u8; 40]); // not 81 bytes
+
+    let result = client.try_request_credit(&borrower, &seal, &short_journal);
+    assert!(result.is_err());
+}
+
+#[test]
+#[should_panic]
+fn read_helpers_reject_out_of_range_offsets() {
+    let env = Env::default();
+    // Too short for a 32-byte read at offset 0 -> the read helper must error
+    // instead of letting `journal.get(..).unwrap()` panic uncontrolled.
+    let short = Bytes::from_array(&env, &[0u8; 10]);
+    let _ = read_bytes32(&env, &short, OFF_ISSUER_HASH);
+}
+
+#[test]
 fn register_issuer_marks_trusted() {
     let env = Env::default();
     env.mock_all_auths();
@@ -185,9 +253,9 @@ fn journal_readers_roundtrip() {
     arr[73..81].copy_from_slice(&202506u64.to_be_bytes());
 
     let journal = Bytes::from_array(&env, &arr);
-    assert_eq!(read_u64_be(&journal, OFF_THRESHOLD), 3000);
+    assert_eq!(read_u64_be(&env, &journal, OFF_THRESHOLD), 3000);
     assert_eq!(journal.get(OFF_MEETS).unwrap(), 1);
-    assert_eq!(read_u64_be(&journal, OFF_PERIOD), 202506);
+    assert_eq!(read_u64_be(&env, &journal, OFF_PERIOD), 202506);
     assert_eq!(
         read_bytes32(&env, &journal, OFF_ISSUER_HASH),
         BytesN::from_array(&env, &[0x11u8; 32])
