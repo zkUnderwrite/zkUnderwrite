@@ -15,7 +15,7 @@ issue in this repository already covers part of a gap, it is named.
 ## Actors
 
 - **Issuer.** Holds an Ed25519 signing key (`issuer/src/main.rs`) and signs
-  income statements (`subject_id`, `issuer`, `period_months`,
+  income statements (`subject_id`, `issuer`, `period`, `period_months`,
   `monthly_net_income`, ...). Plays the role of a bank or payroll provider.
   The contract trusts an issuer purely by `sha256(issuer_pubkey)` being
   present in its `Issuer(...)` storage map (`register_issuer` in
@@ -72,54 +72,47 @@ problem, not something the current proof system can rule out.
 **Follow-up.** Any stronger issuer accountability (e.g. bonding, revocation,
 multi-issuer corroboration) would be a future issue; none exists today.
 
-## Borrower-chosen `threshold` and `period`
+## Borrower-chosen `threshold`; issuer-signed `period`
 
-**Description.** `threshold` and `period` are both written by the **host**
-into the guest's `env::read()` inputs (`zkvm/host/src/main.rs`), not read
-from the signed `statement.json`. `threshold` is compared against the
-contract's `RequiredThreshold` policy (`request_credit` rejects
-`threshold < required`), so a borrower cannot claim a lower bar than the
-lender requires — but the borrower still picks the exact `threshold` value
-that is committed into the journal and can set it to exactly the lender's
-minimum regardless of their real income margin above it. That part is
-intended: the journal is only supposed to reveal "income meets threshold",
-not the amount.
+**Description.** `threshold` is written by the **host** into the guest's
+`env::read()` input (`zkvm/host/src/main.rs`), not read from the signed
+`statement.json`. It is compared against the contract's `RequiredThreshold`
+policy (`request_credit` rejects `threshold < required`), so a borrower
+cannot claim a lower bar than the lender requires — but the borrower still
+picks the exact `threshold` value that is committed into the journal and can
+set it to exactly the lender's minimum regardless of their real income
+margin above it. That part is intended: the journal is only supposed to
+reveal "income meets threshold", not the amount.
 
-`period` is a different, unresolved case. It is committed into the journal
-(`journal[73,81)`) and folded into the nullifier
-(`sha256(subject_id | issuer | period_le)` in the guest — note the guest
-hashes the little-endian bytes while the journal stores the period big-endian;
-the two encodings are unrelated to each other and this is not itself a
-security issue, just worth knowing when reading both). Critically, **`period`
-is not part of the signed statement at all** — `Statement` in
-`zkvm/methods/guest/src/main.rs` has no `period` field; the issuer only signs
-`period_months` (a count) and a list of incomes, not a calendar period. The
-guest accepts whatever `period` value the host supplies and uses it verbatim
-to compute the nullifier. This means the same signed statement can be
-resubmitted multiple times with different `period` values chosen entirely by
-the borrower, each producing a distinct nullifier that the contract will
-accept as unused — since the `Nullifier` check only prevents reuse of an
-*identical* nullifier, not reuse of the same underlying statement/issuer
-pair.
+`period` used to have the same shape of problem and has been fixed
+(`fix(zk): bind period and nullifier to signed statement data`, issue #11):
+`period` is now a field on the signed `Statement` (`issuer/src/main.rs`,
+`zkvm/methods/guest/src/main.rs`) and the guest reads it from the parsed,
+signature-verified statement (`st.period`) instead of accepting it as a host
+`env::read()` input. `zkvm/host/src/main.rs` no longer writes a `PERIOD`
+value into the executor environment at all. Because `period` is now covered
+by the issuer's Ed25519 signature over `statement_bytes`, a borrower can no
+longer re-run the prover against the same signed statement with a different
+period to mint a fresh nullifier — the period, and therefore the nullifier,
+is fixed the moment the issuer signs.
 
-**Current mitigation.** None at the statement level. The only nullifier
-protection is that identical `(subject_id, issuer, period)` triples collide;
-distinct `period` choices freely bypass it.
+**Current mitigation.** `period` is part of the signed statement and is
+folded into the nullifier alongside `subject_id`/`issuer` (see the next
+section for the encoding). The guest has no code path that reads a period
+value from the host.
 
-**Residual risk.** A borrower can effectively replay one issuer-signed income
-statement into multiple separate `request_credit` calls (and multiple
-disbursed credit lines) by varying only the host-supplied `period`. This is a
-known weakness of the current nullifier design, not a theoretical one — this
-repository already has an open issue for it: `fix(zk): bind period and
-nullifier to signed statement data` (issue #11). That issue is **open, not
-merged** as of this writing; do not treat the weakness as fixed. This
-document only describes the current behavior.
+**Residual risk.** None from host-supplied period variation. The remaining
+exposure is the same as for any signed field: a borrower can only obtain
+distinct valid `(subject_id, issuer, period)` nullifiers by obtaining
+distinct issuer-signed statements, which requires issuer cooperation and is
+the intended trust boundary (see "Issuer authenticity and trust" above).
 
-**Follow-up.** Tracked by the open issue named above; a future issue.
+**Follow-up.** None outstanding for this specific weakness; issue #11 is
+resolved by this change.
 
 ## Nullifier scope and the `|`-join non-injectivity
 
-**Description.** The nullifier is computed as
+**Description.** The nullifier used to be computed as
 `sha256(subject_id.as_bytes() || b"|" || issuer.as_bytes() || b"|" ||
 period.to_le_bytes())` (`zkvm/methods/guest/src/main.rs`). Both `subject_id`
 and `issuer` are attacker-controlled strings inside the signed statement (the
@@ -136,21 +129,24 @@ existing one (denial of service against themselves) or, more relevant, to
 make two conceptually different statements delimit identically and be
 treated as the same nullifier scope.
 
-**Current mitigation.** None; there is no length-prefixing or escaping of
-`subject_id` / `issuer` before hashing.
+This has been fixed (issue #11): the nullifier is now computed as
+`sha256(len(subject_id) as u32 BE || subject_id || len(issuer) as u32 BE ||
+issuer || period as u64 BE)`. Each variable-length field is preceded by its
+own fixed-width big-endian length prefix, so no byte sequence can be
+reinterpreted as belonging to a different field — the encoding is injective
+regardless of what bytes `subject_id` or `issuer` contain. `period` is now
+also big-endian in the nullifier hash (previously little-endian), matching
+the journal's encoding of the same value.
 
-**Residual risk.** Low likelihood of being a practical exploit today (the
-demo issuer only ever sets `subject_id` and `issuer` to operator-chosen
-values, e.g. `"bank-of-stellar"`), but it is a genuine construction weakness
-if issuer or subject identifiers are ever taken from less controlled input.
-The main harm is that two operationally distinct (subject, issuer) pairs
-could theoretically be crafted to nullify identically; it does not on its own
-let anyone forge a valid proof, since the signature and threshold checks
-still apply to whatever statement produced that nullifier.
+**Current mitigation.** Length-prefixed encoding in
+`zkvm/methods/guest/src/main.rs` (see above).
 
-**Follow-up.** A future issue could switch to length-prefixed or otherwise
-injective encoding (e.g. hashing `len(subject_id) || subject_id || len(issuer)
-|| issuer || period`); none exists yet.
+**Residual risk.** None from the join ambiguity described above. Two
+distinct `(subject_id, issuer, period)` triples can no longer produce a
+colliding pre-image.
+
+**Follow-up.** None outstanding for this specific weakness; issue #11 is
+resolved by this change.
 
 ## Treasury drain scenarios
 
@@ -158,7 +154,8 @@ injective encoding (e.g. hashing `len(subject_id) || subject_id || len(issuer)
 once at `init`, no per-request sizing) straight from the contract's own USDC
 balance to any `borrower` address that supplies a valid proof satisfying
 policy. There is no rate limiting, no per-borrower cap beyond the implicit
-one-nullifier-per-(subject, issuer, period) rule, and no circuit breaker.
+one-nullifier-per-(subject, issuer, period) rule (see below), and no circuit
+breaker.
 
 **Current mitigation.**
 - Proof validity (Groth16 verification against the pinned `image_id`) means a
@@ -167,21 +164,20 @@ one-nullifier-per-(subject, issuer, period) rule, and no circuit breaker.
   `NullifierAlreadyUsed` checks in `request_credit` gate disbursement.
 - Each successful, distinct nullifier can only disburse once.
 
-**Residual risk.** Given the `period`-binding weakness above, one signed
-income statement can currently be turned into multiple accepted nullifiers
-and therefore multiple `CreditAmount` disbursements — this is the most direct
-path to draining the treasury faster than the lender's policy intends, and it
-compounds with the issuer-trust risk (a single compromised or malicious
-issuer key can back an unbounded number of `period`-varied nullifiers). There
-is also no contract-level cap on total disbursed amount or remaining
-treasury balance check before transfer; if the treasury balance is
-insufficient the SAC transfer will simply fail, but nothing in the contract
-proactively pauses new credit lines as the balance runs low.
+**Residual risk.** The `period`-binding weakness that used to let one signed
+income statement be turned into multiple accepted nullifiers (and therefore
+multiple `CreditAmount` disbursements) is fixed (issue #11): `period` is now
+part of the issuer-signed statement, so a compromised or malicious issuer key
+can still back multiple disbursements, but only by signing multiple distinct
+statements — not by a borrower varying a host-supplied value against one
+signed statement. There is still no contract-level cap on total disbursed
+amount or remaining treasury balance check before transfer; if the treasury
+balance is insufficient the SAC transfer will simply fail, but nothing in the
+contract proactively pauses new credit lines as the balance runs low.
 
-**Follow-up.** Fixing the `period` binding (issue #11, open) closes the main
-amplification vector; broader treasury safeguards (caps, pausability) are not
-tracked by an existing issue in this repository and would need a future
-issue.
+**Follow-up.** The `period`-binding amplification vector is closed by issue
+#11; broader treasury safeguards (caps, pausability) are not tracked by an
+existing issue in this repository and would need a future issue.
 
 ## Proof malleability (Groth16 / RISC0 setup as used)
 
